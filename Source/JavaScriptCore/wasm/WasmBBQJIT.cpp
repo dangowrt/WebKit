@@ -4601,6 +4601,7 @@ void BBQJIT::emitTailCall(FunctionSpaceIndex functionIndexSpace, const RTT& sign
     if (m_info.isImportedFunctionFromFunctionIndexSpace(functionIndexSpace)) {
         static_assert(sizeof(WasmOrJSImportableFunctionCallLinkInfo) * maxImports < std::numeric_limits<int32_t>::max());
         RELEASE_ASSERT(JSWebAssemblyInstance::offsetOfImportFunctionStub(m_module.moduleInformation(), functionIndexSpace) < std::numeric_limits<int32_t>::max());
+        emitSignExtendI32ArgsForCCall(callInfo, signature);
         m_jit.call(Address(GPRInfo::wasmContextInstancePointer, JSWebAssemblyInstance::offsetOfImportFunctionStub(m_module.moduleInformation(), functionIndexSpace)), WasmEntryPtrTag);
     } else {
         // Record the callee so the callee knows to look for it in updateCallsitesToCallUs.
