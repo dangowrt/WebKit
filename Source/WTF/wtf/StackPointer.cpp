@@ -171,6 +171,17 @@ __asm__(
      ".previous" "\n"
 );
 
+#elif CPU(PPC) || CPU(PPC64)
+asm (
+    ".text" "\n"
+    ".globl " SYMBOL_STRING(currentStackPointer) "\n"
+    SYMBOL_STRING(currentStackPointer) ":" "\n"
+
+    "mr 3, 1" "\n" // Move stack pointer (r1) to return register (r3)
+    "blr" "\n"     // Branch to link register (return)
+    ".previous" "\n"
+);
+
 #else
 #error "Unsupported platform: need implementation of currentStackPointer."
 #endif
