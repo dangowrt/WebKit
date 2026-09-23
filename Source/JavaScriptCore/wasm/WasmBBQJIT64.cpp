@@ -634,6 +634,29 @@ void BBQJIT::emitAtomicOpGeneric(ExtAtomicOpType op, Address address, GPRReg old
         RELEASE_ASSERT_NOT_REACHED();
     }
     m_jit.branchTest32(ResultCondition::NonZero, scratchGPR).linkTo(reloopLabel, &m_jit);
+#elif CPU(RISCV64)
+    // Slow path: plain load+store (no LR/SC). rv64gc does include the
+    // A-extension, but MacroAssemblerRISCV64.h's loadLinkAcq/storeCondRel
+    // primitives are still stubs. This is single-threaded-correct only;
+    // multi-threaded code would race. TODO: emit amo.* / lr.d+sc.d for
+    // a truly atomic version.
+    switch (accessWidth) {
+    case Width8:
+        m_jit.store8(scratchGPR, address);
+        break;
+    case Width16:
+        m_jit.store16(scratchGPR, address);
+        break;
+    case Width32:
+        m_jit.store32(scratchGPR, address);
+        break;
+    case Width64:
+        m_jit.store64(scratchGPR, address);
+        break;
+    case Width128:
+        RELEASE_ASSERT_NOT_REACHED();
+    }
+    UNUSED_PARAM(reloopLabel);
 #endif
 }
 
@@ -1266,6 +1289,51 @@ Value BBQJIT::emitAtomicBinaryRMWOp(ExtAtomicOpType op, Type valueType, Location
             }
             return;
         }
+
+#if CPU(RISCV64)
+        // Slow path: non-atomic CAS. Load current into resultGPR, compare
+        // to expectedGPR, store valueGPR only on equality. Single-threaded
+        // correct only. TODO: emit lr.{d,w}+sc.{d,w} for a truly atomic
+        // version using the rv64gc A-extension.
+        switch (accessWidth) {
+        case Width8:
+            m_jit.load8(address, resultGPR);
+            break;
+        case Width16:
+            m_jit.load16(address, resultGPR);
+            break;
+        case Width32:
+            m_jit.load32(address, resultGPR);
+            break;
+        case Width64:
+            m_jit.load64(address, resultGPR);
+            break;
+        default:
+            RELEASE_ASSERT_NOT_REACHED();
+            break;
+        }
+        auto notEqual = m_jit.branch64(MacroAssembler::NotEqual, resultGPR, expectedGPR);
+        switch (accessWidth) {
+        case Width8:
+            m_jit.store8(valueGPR, address);
+            break;
+        case Width16:
+            m_jit.store16(valueGPR, address);
+            break;
+        case Width32:
+            m_jit.store32(valueGPR, address);
+            break;
+        case Width64:
+            m_jit.store64(valueGPR, address);
+            break;
+        default:
+            RELEASE_ASSERT_NOT_REACHED();
+            break;
+        }
+        notEqual.link(&m_jit);
+        UNUSED_PARAM(scratchGPR);
+        return;
+#endif
 
         m_jit.move(expectedGPR, resultGPR);
         switch (accessWidth) {
