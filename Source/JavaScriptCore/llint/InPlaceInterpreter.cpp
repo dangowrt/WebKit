@@ -77,7 +77,7 @@ do { \
 
 void initialize()
 {
-#if !ENABLE(C_LOOP) && (CPU(ADDRESS64) && (CPU(ARM64) || CPU(X86_64)))
+#if !ENABLE(C_LOOP) && (CPU(ADDRESS64) && (CPU(ARM64) || CPU(X86_64) || CPU(RISCV64)))
 
 #define INIT_IPINT_BASE_POINTER(basePointerName, targetAddress) \
     g_opcodeConfig.basePointerName = removeCodePtrTag(reinterpret_cast<void*>(targetAddress));
@@ -95,13 +95,19 @@ void initialize()
     FOR_EACH_IPINT_MINT_RETURN_OPCODE(VALIDATE_IPINT_MINT_RETURN_OPCODE);
     FOR_EACH_IPINT_UINT_OPCODE(VALIDATE_IPINT_UINT_OPCODE);
 #else
-    RELEASE_ASSERT_NOT_REACHED("IPInt only supports ARM64 and X86_64 (for now).");
+    // No IPInt opcode dispatch table on this architecture: offlineasm
+    // does not emit the ipint_*_validate entry points outside the guard
+    // above, so there is nothing to validate. LLInt::initialize() calls
+    // us unconditionally; just return. Options::useWasmIPInt is forced
+    // false on such architectures (see Options.cpp), so the
+    // (uninitialised) g_opcodeConfig dispatch base pointers are never
+    // read at run time.
 #endif
 }
 
 void verifyInitialization()
 {
-#if !ENABLE(C_LOOP) && (CPU(ADDRESS64) && (CPU(ARM64) || CPU(X86_64)))
+#if !ENABLE(C_LOOP) && (CPU(ADDRESS64) && (CPU(ARM64) || CPU(X86_64) || CPU(RISCV64)))
 
 #define VERIFY_IPINT_BASE_POINTER(basePointerName, targetAddress) \
     RELEASE_ASSERT(g_opcodeConfig.basePointerName == removeCodePtrTag(reinterpret_cast<void*>(targetAddress)));
