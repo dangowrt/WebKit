@@ -749,6 +749,9 @@ BBQJIT::BBQJIT(CompilationContext& compilationContext, const RTT& signature, Mod
 
 bool BBQJIT::canTierUpToOMG() const
 {
+#if !ENABLE(WEBASSEMBLY_OMGJIT)
+    return false;
+#else
     if (!Options::useOMGJIT())
         return false;
 
@@ -760,6 +763,7 @@ bool BBQJIT::canTierUpToOMG() const
         return false;
     }
     return true;
+#endif
 }
 
 void BBQJIT::emitIncrementCallProfileCount(unsigned callProfileIndex)
@@ -3229,7 +3233,10 @@ void BBQJIT::emitEntryTierUpCheck()
         jit.jump(tierUpResume);
     });
 #else
-    RELEASE_ASSERT_NOT_REACHED();
+    // OMG/FTL tiering is unavailable on this architecture; canTierUpToOMG()
+    // can still return true (it is gated only on per-function thresholds, not
+    // on the OMG implementation being compiled in), so silently skip emitting
+    // the tier-up counter check rather than aborting.
 #endif
 }
 
