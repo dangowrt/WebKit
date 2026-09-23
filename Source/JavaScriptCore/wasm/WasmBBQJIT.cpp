@@ -4396,6 +4396,25 @@ void BBQJIT::restoreValuesAfterCall(const CallInformation& callInfo)
     // whenever they are next used.
 }
 
+void BBQJIT::emitSignExtendI32ArgsForCCall(const CallInformation& callInfo, const RTT& signature)
+{
+#if CPU(RISCV64)
+    for (size_t i = 0; i < callInfo.params.size(); ++i) {
+        auto type = signature.argumentType(i);
+        if (type.kind != TypeKind::I32)
+            continue;
+        Location loc = Location::fromArgumentLocation(callInfo.params[i], type.kind);
+        if (!loc.isGPR())
+            continue;
+        // sext.w rd, rs lowers via signExtend32To64 -> rv_addiw rd, rs, 0
+        m_jit.signExtend32To64(loc.asGPR(), loc.asGPR());
+    }
+#else
+    UNUSED_PARAM(callInfo);
+    UNUSED_PARAM(signature);
+#endif
+}
+
 template<size_t N>
 void BBQJIT::returnValuesFromCall(Vector<Value, N>& results, const RTT& functionType, const CallInformation& callInfo)
 {
