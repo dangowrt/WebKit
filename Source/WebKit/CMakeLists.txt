@@ -131,6 +131,11 @@ set(WebKit_PRIVATE_INCLUDE_DIRECTORIES
     "${WEBKIT_DIR}/WebProcess/XR"
     "${CMAKE_SOURCE_DIR}/Source"
     "${CMAKE_SOURCE_DIR}/WebKitLibraries"
+    # Last: WebCore stages its private headers as a flat directory of symlinks
+    # into the source tree, so a WebCore header reached from here resolves its
+    # own siblings by bare name. It must not precede WebKit's own directories,
+    # which carry same-named headers such as WebGPUSupportedFeatures.h.
+    "${WebCore_PRIVATE_HEADERS_DIR}"
 )
 
 set(PROTOCOL_GENERATOR_SCRIPTS_DIR "${JAVASCRIPTCORE_DIR}/inspector/scripts")
