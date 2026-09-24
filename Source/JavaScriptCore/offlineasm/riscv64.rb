@@ -670,7 +670,7 @@ def riscv64LowerOperation(list)
         case riscv64OperandTypes(node.operands)
         when [RegisterID]
             callOpcode = "jalr"
-        when [LabelReference]
+        when [LabelReference], [LocalLabelReference]
             callOpcode = "call"
         else
             riscv64RaiseMismatchedOperands(node.operands)
