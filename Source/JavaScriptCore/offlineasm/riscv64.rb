@@ -1607,7 +1607,7 @@ def riscv64LowerFPBranch(list)
     end
 
     def emit(newList, node, precision, condition)
-        riscv64ValidateOperands(node.operands, [FPRegisterID, FPRegisterID, LocalLabelReference])
+        riscv64ValidateOperands(node.operands, [FPRegisterID, FPRegisterID, LocalLabelReference], [FPRegisterID, FPRegisterID, LabelReference])
         operands = node.operands
 
         if [:equn, :nequn, :gtun, :gtequn, :ltun, :ltequn].include? condition
@@ -1761,7 +1761,7 @@ class Instruction
             riscv64ValidateOperands(operands, [RegisterID, RegisterID, LocalLabelReference], [RegisterID, RegisterID, LabelReference])
             $asm.puts "#{rvop(opcode)} #{operands[0].riscv64Operand}, #{operands[1].riscv64Operand}, #{operands[2].asmLabel}"
         when /^rv_b(eqz|nez|lez|ltz|gez|gtz)$/
-            riscv64ValidateOperands(operands, [RegisterID, LocalLabelReference])
+            riscv64ValidateOperands(operands, [RegisterID, LocalLabelReference], [RegisterID, LabelReference])
             $asm.puts "#{rvop(opcode)} #{operands[0].riscv64Operand}, #{operands[1].asmLabel}"
         when "rv_nop", "rv_ret", "rv_ebreak"
             $asm.puts "#{rvop(opcode)}"
