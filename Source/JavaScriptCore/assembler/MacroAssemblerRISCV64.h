@@ -1523,6 +1523,20 @@ public:
             store64(TrustedImm32(int32_t(value)), address);
     }
 
+    void store64(TrustedImm32 imm, BaseIndex address)
+    {
+        auto temp = temps<Data, Memory>();
+        RegisterID immRegister = RISCV64Registers::zero;
+        if (!!imm.m_value) {
+            loadImmediate(imm, temp.data());
+            m_assembler.maskRegister<32>(temp.data());
+            immRegister = temp.data();
+        }
+
+        auto resolution = resolveAddress(address, temp.memory());
+        m_assembler.sdInsn(resolution.base, immRegister, Imm::S(resolution.offset));
+    }
+
     void store64(TrustedImm64 imm, BaseIndex address)
     {
         auto temp = temps<Data, Memory>();
@@ -4548,6 +4562,16 @@ public:
         m_assembler.addiInsn(dest, trueSrc, Imm::I<0>());
         m_assembler.jalInsn(RISCV64Registers::zero, Imm::J<8>());
         m_assembler.addiInsn(dest, falseSrc, Imm::I<0>());
+    }
+
+    void moveConditionally32(RelationalCondition cond, RegisterID lhs, TrustedImm32 imm, TrustedImm32 trueImm, RegisterID falseSrc, RegisterID dest)
+    {
+        Jump falseCase = branch32(invert(cond), lhs, imm);
+        move(trueImm, dest);
+        Jump end = jump();
+        falseCase.link(this);
+        move(falseSrc, dest);
+        end.link(this);
     }
 
     void moveConditionally64(RelationalCondition cond, RegisterID lhs, RegisterID rhs, RegisterID src, RegisterID dest)
