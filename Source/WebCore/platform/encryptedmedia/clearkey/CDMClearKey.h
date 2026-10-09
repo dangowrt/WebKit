@@ -33,8 +33,10 @@
 #include "CDMFactory.h"
 #include "CDMInstanceSession.h"
 #include "CDMPrivate.h"
+#include "CDMKeyID.h"
 #include "CDMProxy.h"
 #include "SharedBuffer.h"
+#include <wtf/JSONValues.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/WeakPtr.h>
 
@@ -50,6 +52,13 @@ enum {
     KeyIDSizeInBytes = 16,
     IVSizeInBytes = 16,
 };
+
+// EME-level ClearKey helpers, shared with the GStreamer external-CDM backend
+// so the key-id and JSON Web Key handling is not reimplemented.
+std::optional<Vector<Ref<KeyHandle>>> parseLicenseFormat(const JSON::Object&);
+bool parseLicenseReleaseAcknowledgementFormat(const JSON::Object&);
+CDMKeyID extractKeyidsFromCencInitData(const SharedBuffer&);
+CDMKeyID extractKeyIdFromWebMInitData(const SharedBuffer&);
 
 } // namespace ClearKey
 

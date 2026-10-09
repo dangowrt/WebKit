@@ -37,13 +37,21 @@
 #include "CDMThunder.h"
 #endif
 
+#if ENABLE(EXTERNAL_CDM)
+#include "CDMExternalCDM.h"
+#endif
+
 namespace WebCore {
 
 void CDMFactory::platformRegisterFactories(Vector<WeakRef<CDMFactory>>& factories)
 {
 #if ENABLE(THUNDER)
     factories.append(CDMFactoryThunder::singleton());
-#else
+#endif
+#if ENABLE(EXTERNAL_CDM)
+    factories.append(CDMFactoryExternalCDM::singleton());
+#endif
+#if !ENABLE(THUNDER) && !ENABLE(EXTERNAL_CDM)
     UNUSED_PARAM(factories);
 #endif
 }
@@ -52,8 +60,10 @@ Vector<CDMProxyFactory*> CDMProxyFactory::platformRegisterFactories()
 {
     Vector<CDMProxyFactory*> factories;
 #if ENABLE(THUNDER)
-    factories.reserveInitialCapacity(1);
     factories.append(&CDMFactoryThunder::singleton());
+#endif
+#if ENABLE(EXTERNAL_CDM)
+    factories.append(&CDMFactoryExternalCDM::singleton());
 #endif
     return factories;
 }

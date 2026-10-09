@@ -89,6 +89,11 @@
 #include "WebKitThunderParser.h"
 #endif
 
+#if ENABLE(ENCRYPTED_MEDIA) && ENABLE(EXTERNAL_CDM)
+#include "CDMExternalCDM.h"
+#include "WebKitExternalCDMDecryptorGStreamer.h"
+#endif
+
 #if ENABLE(VIDEO)
 #include "ImageDecoderGStreamer.h"
 #include "VideoEncoderPrivateGStreamer.h"
@@ -564,6 +569,11 @@ void registerWebKitGStreamerElements()
             gst_element_register(nullptr, "webkitthunder", GST_RANK_PRIMARY + 100, WEBKIT_TYPE_MEDIA_THUNDER_DECRYPT);
             gst_element_register(nullptr, "webkitthunderparser", GST_RANK_PRIMARY + 101, WEBKIT_TYPE_MEDIA_THUNDER_PARSER);
         }
+#endif
+
+#if ENABLE(ENCRYPTED_MEDIA) && ENABLE(EXTERNAL_CDM)
+        if (!CDMFactoryExternalCDM::singleton().supportedKeySystems().isEmpty())
+            gst_element_register(nullptr, "webkitexternalcdm", GST_RANK_PRIMARY + 100, WEBKIT_TYPE_MEDIA_EXTERNAL_CDM_DECRYPT);
 #endif
 
 #if ENABLE(MEDIA_STREAM)

@@ -104,6 +104,9 @@ public:
 #if ENABLE(THUNDER)
         Thunder,
 #endif
+#if ENABLE(EXTERNAL_CDM)
+        ExternalCDM,
+#endif
     };
     virtual ImplementationType implementationType() const = 0;
 
