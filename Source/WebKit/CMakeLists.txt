@@ -1492,6 +1492,17 @@ list(APPEND WebProcess_PRIVATE_INCLUDE_DIRECTORIES $<TARGET_PROPERTY:WebKit,INCL
 WEBKIT_EXECUTABLE(WebProcess)
 WEBKIT_REUSE_PREFIX_HEADER(WebProcess WebKit WebKitPrefix.h PREFIX_LANGUAGES CXX)
 
+if (UNIX AND NOT APPLE)
+    # musl takes the default pthread stack size from the main executable's
+    # PT_GNU_STACK size and otherwise gives new threads a 128 KiB stack.
+    # External CDM modules are built against glibc and assume its 8 MiB
+    # default; their decrypt path runs on a GStreamer streaming thread and
+    # overflows the smaller stack. Size the segment to 8 MiB so those
+    # threads get a glibc-sized stack. glibc does not honour the size, so
+    # the option has no effect there.
+    target_link_options(WebProcess PRIVATE "LINKER:-z,stack-size=8388608")
+endif ()
+
 list(APPEND NetworkProcess_PRIVATE_INCLUDE_DIRECTORIES $<TARGET_PROPERTY:WebKit,INCLUDE_DIRECTORIES>)
 WEBKIT_EXECUTABLE(NetworkProcess)
 WEBKIT_REUSE_PREFIX_HEADER(NetworkProcess WebKit WebKitPrefix.h PREFIX_LANGUAGES CXX)
