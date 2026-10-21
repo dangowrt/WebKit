@@ -33,6 +33,7 @@
 
 #include "CDMClearKey.h"
 #include "CDMKeySystemConfiguration.h"
+#include "CDMMessageType.h"
 #include "CDMProxyExternalCDM.h"
 #include "CDMRestrictions.h"
 #include "CDMSessionType.h"
@@ -40,12 +41,15 @@
 #include "GStreamerCommon.h"
 #include "GStreamerEMEUtilities.h"
 #include "Logging.h"
+#include <cstdlib>
 #include <ranges>
+#include <wtf/FileSystem.h>
 #include <wtf/JSONValues.h>
 #include <wtf/MainThread.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/Base64.h>
+#include <wtf/text/MakeString.h>
 #include <wtf/text/StringToIntegerConversion.h>
 
 namespace WebCore {
@@ -53,6 +57,37 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CDMFactoryExternalCDM);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CDMPrivateExternalCDM);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CDMInstanceExternalCDM);
+
+static String widevineBlobPath()
+{
+    if (const char* env = getenv("WPE_WIDEVINE_CDM_PATH")) {
+        if (*env)
+            return String::fromUTF8(env);
+    }
+    return { };
+}
+
+static CDMInstanceSession::KeyStatus keyStatusFromCdm(media::CdmAdapterClient::CDMKeyStatus status)
+{
+    switch (status) {
+    case media::CdmAdapterClient::CDMKeyStatus::kUsable:
+        return CDMInstanceSession::KeyStatus::Usable;
+    case media::CdmAdapterClient::CDMKeyStatus::kExpired:
+        return CDMInstanceSession::KeyStatus::Expired;
+    case media::CdmAdapterClient::CDMKeyStatus::kReleased:
+        return CDMInstanceSession::KeyStatus::Released;
+    case media::CdmAdapterClient::CDMKeyStatus::kOutputRestricted:
+        return CDMInstanceSession::KeyStatus::OutputRestricted;
+    case media::CdmAdapterClient::CDMKeyStatus::kOutputDownscaled:
+        return CDMInstanceSession::KeyStatus::OutputDownscaled;
+    case media::CdmAdapterClient::CDMKeyStatus::kStatusPending:
+    case media::CdmAdapterClient::CDMKeyStatus::kUsableInFuture:
+        return CDMInstanceSession::KeyStatus::StatusPending;
+    case media::CdmAdapterClient::CDMKeyStatus::kInternalError:
+    default:
+        return CDMInstanceSession::KeyStatus::InternalError;
+    }
+}
 
 CDMFactoryExternalCDM& CDMFactoryExternalCDM::singleton()
 {
@@ -68,9 +103,12 @@ CDMFactoryExternalCDM::CDMFactoryExternalCDM()
 {
     ASSERT(isMainThread());
 
-    // ClearKey is software-only and always available. Widevine and other
-    // blob-backed key systems are a later iteration of this backend.
+    // ClearKey is software-only and always available. Widevine is offered when
+    // the Chromium CDM blob is present; it is loaded lazily per instance.
     m_supportedKeySystems.append(String::fromLatin1(GStreamerEMEUtilities::s_ClearKeyKeySystem));
+
+    if (FileSystem::fileExists(widevineBlobPath()))
+        m_supportedKeySystems.append(String::fromLatin1(GStreamerEMEUtilities::s_WidevineKeySystem));
 }
 
 std::unique_ptr<CDMPrivate> CDMFactoryExternalCDM::createCDM(const String& keySystem, const String& mediaKeysHashSalt, const CDMPrivateClient&)
@@ -96,8 +134,15 @@ CDMPrivateExternalCDM::CDMPrivateExternalCDM(const String& keySystem)
 {
 }
 
+bool CDMPrivateExternalCDM::isWidevine() const
+{
+    return GStreamerEMEUtilities::isWidevineKeySystem(m_keySystem);
+}
+
 Vector<String> CDMPrivateExternalCDM::supportedInitDataTypes() const
 {
+    if (isWidevine())
+        return { "keyids"_s, "cenc"_s, "cbcs"_s, "webm"_s };
     return { "keyids"_s, "cenc"_s, "webm"_s };
 }
 
@@ -111,7 +156,10 @@ bool CDMPrivateExternalCDM::supportsConfiguration(const CDMKeySystemConfiguratio
     if (configuration.distinctiveIdentifier == CDMRequirement::Required)
         return false;
 
-    if (configuration.persistentState == CDMRequirement::Required && !containsPersistentLicenseType(configuration.sessionTypes))
+    // Widevine persists device state through CreateFileIO regardless of session
+    // type; the persistent-license requirement is a ClearKey-only rule.
+    if (configuration.persistentState == CDMRequirement::Required && !isWidevine()
+        && !containsPersistentLicenseType(configuration.sessionTypes))
         return false;
 
     return true;
@@ -126,7 +174,9 @@ bool CDMPrivateExternalCDM::supportsConfigurationWithRestrictions(const CDMKeySy
     if (configuration.persistentState == CDMRequirement::Optional && restrictions.persistentStateDenied)
         return false;
 
-    if (configuration.persistentState == CDMRequirement::Required && !containsPersistentLicenseType(configuration.sessionTypes))
+    if (configuration.persistentState == CDMRequirement::Required
+        && (restrictions.persistentStateDenied
+            || (!isWidevine() && !containsPersistentLicenseType(configuration.sessionTypes))))
         return false;
 
     return true;
@@ -141,6 +191,8 @@ bool CDMPrivateExternalCDM::supportsSessionTypeWithConfiguration(const CDMSessio
 
 Vector<String> CDMPrivateExternalCDM::supportedRobustnesses() const
 {
+    if (isWidevine())
+        return { emptyString(), "SW_SECURE_CRYPTO"_s, "SW_SECURE_DECODE"_s };
     return { emptyString() };
 }
 
@@ -175,8 +227,7 @@ void CDMPrivateExternalCDM::loadAndInitialize()
 
 bool CDMPrivateExternalCDM::supportsServerCertificates() const
 {
-    // ClearKey does not use server certificates.
-    return false;
+    return isWidevine();
 }
 
 bool CDMPrivateExternalCDM::supportsSessions() const
@@ -192,6 +243,9 @@ bool CDMPrivateExternalCDM::supportsInitData(const String& initDataType, const S
     if (equalLettersIgnoringASCIICase(initDataType, "cenc"_s) && !initData.isEmpty())
         return true;
 
+    if (isWidevine() && equalLettersIgnoringASCIICase(initDataType, "cbcs"_s) && !initData.isEmpty())
+        return true;
+
     if (equalLettersIgnoringASCIICase(initDataType, "webm"_s) && !initData.isEmpty())
         return true;
 
@@ -200,6 +254,10 @@ bool CDMPrivateExternalCDM::supportsInitData(const String& initDataType, const S
 
 RefPtr<SharedBuffer> CDMPrivateExternalCDM::sanitizeResponse(const SharedBuffer& response) const
 {
+    // A Widevine licence is an opaque binary blob; ClearKey is JSON.
+    if (isWidevine())
+        return response.makeContiguous();
+
     if (!CDMUtilities::parseJSONObject(response))
         return nullptr;
     return response.makeContiguous();
@@ -207,9 +265,70 @@ RefPtr<SharedBuffer> CDMPrivateExternalCDM::sanitizeResponse(const SharedBuffer&
 
 std::optional<String> CDMPrivateExternalCDM::sanitizeSessionId(const String& sessionId) const
 {
+    if (isWidevine())
+        return sessionId.isEmpty() ? std::nullopt : std::make_optional(sessionId);
+
     if (!parseInteger<uint32_t>(sessionId))
         return std::nullopt;
     return sessionId;
+}
+
+ExternalCdmClient::ExternalCdmClient(CDMInstanceExternalCDM& instance)
+    : m_instance(&instance)
+{
+    ASSERT(isMainThread());
+}
+
+void ExternalCdmClient::clearInstance()
+{
+    ASSERT(isMainThread());
+    m_instance = nullptr;
+}
+
+void ExternalCdmClient::OnCDMMessage(const char* session, uint32_t sessionSize, CDMADPMSG msg, const uint8_t* data, size_t dataSize, uint32_t)
+{
+    String sessionID = session ? String::fromUTF8(unsafeMakeSpan(session, static_cast<size_t>(sessionSize))) : emptyString();
+    auto buffer = (data && dataSize) ? SharedBuffer::create(unsafeMakeSpan(data, dataSize)) : SharedBuffer::create();
+    callOnMainThread([protectedThis = Ref { *this }, sessionID = sessionID.isolatedCopy(), msg, buffer = WTF::move(buffer)]() mutable {
+        if (protectedThis->m_instance)
+            protectedThis->m_instance->dispatchCdmMessage(sessionID, msg, WTF::move(buffer));
+    });
+}
+
+void ExternalCdmClient::OnKeyStatusChange(const std::string& sessionId, const std::vector<KeyInfo>& keysInfo)
+{
+    String sessionID = String::fromUTF8(unsafeMakeSpan(sessionId.data(), sessionId.size()));
+    Vector<KeyInfo> keys;
+    keys.reserveInitialCapacity(keysInfo.size());
+    for (const auto& key : keysInfo)
+        keys.append(key);
+    callOnMainThread([protectedThis = Ref { *this }, sessionID = sessionID.isolatedCopy(), keys = WTF::move(keys)]() mutable {
+        if (protectedThis->m_instance)
+            protectedThis->m_instance->dispatchKeyStatusChange(sessionID, WTF::move(keys));
+    });
+}
+
+cdm::Buffer* ExternalCdmClient::AllocateBuffer(size_t size)
+{
+    return new ExternalCdmHeapBuffer(size);
+}
+
+void ExternalCdmClient::OnPromiseResolved(uint32_t promiseId)
+{
+    callOnMainThread([protectedThis = Ref { *this }, promiseId] {
+        if (protectedThis->m_instance)
+            protectedThis->m_instance->settlePromise(promiseId, true);
+    });
+}
+
+void ExternalCdmClient::OnPromiseRejected(uint32_t promiseId, uint32_t systemCode, const std::string& message)
+{
+    String reason = String::fromUTF8(unsafeMakeSpan(message.data(), message.size()));
+    callOnMainThread([protectedThis = Ref { *this }, promiseId, systemCode, reason = reason.isolatedCopy()] {
+        LOG(EME, "EME - ExternalCDM - promise %u rejected, system code %u: %s", promiseId, systemCode, reason.utf8().data());
+        if (protectedThis->m_instance)
+            protectedThis->m_instance->settlePromise(promiseId, false);
+    });
 }
 
 CDMInstanceExternalCDM::CDMInstanceExternalCDM(const String& keySystem)
@@ -218,25 +337,192 @@ CDMInstanceExternalCDM::CDMInstanceExternalCDM(const String& keySystem)
 {
 }
 
+CDMInstanceExternalCDM::~CDMInstanceExternalCDM()
+{
+    if (m_adapter)
+        m_adapter->RemoveClient();
+    if (m_client)
+        m_client->clearInstance();
+    for (auto& callback : std::exchange(m_pendingPromises, { }).values())
+        callback(false);
+}
+
+uint32_t CDMInstanceExternalCDM::registerPromise(PromiseCallback&& callback)
+{
+    ASSERT(isMainThread());
+    uint32_t promiseId = nextPromiseId();
+    m_pendingPromises.add(promiseId, WTF::move(callback));
+    return promiseId;
+}
+
+void CDMInstanceExternalCDM::settlePromise(uint32_t promiseId, bool succeeded)
+{
+    ASSERT(isMainThread());
+    if (auto callback = m_pendingPromises.take(promiseId))
+        callback(succeeded);
+}
+
+bool CDMInstanceExternalCDM::isWidevine() const
+{
+    return GStreamerEMEUtilities::isWidevineKeySystem(m_keySystem);
+}
+
+std::shared_ptr<media::CdmAdapter> CDMInstanceExternalCDM::ensureAdapter()
+{
+    ASSERT(isMainThread());
+
+    if (m_adapter)
+        return m_adapter;
+    if (m_adapterLoadFailed)
+        return nullptr;
+
+    String base = m_storageDirectory.isEmpty() ? String("/tmp/wpe-cdm"_s) : m_storageDirectory;
+    if (!base.endsWith('/'))
+        base = makeString(base, '/');
+    FileSystem::makeAllDirectories(base);
+
+    m_client = ExternalCdmClient::create(*this);
+
+    auto adapter = std::make_shared<media::CdmAdapter>(
+        std::string(m_keySystem.utf8().data()),
+        std::string(widevineBlobPath().utf8().data()),
+        std::string(base.utf8().data()),
+        media::CdmConfig(false, m_allowPersistentState, false),
+        m_client.get());
+
+    if (!adapter->LoadCDM() || !adapter->Initialize()) {
+        LOG(EME, "EME - ExternalCDM - failed to load or initialise the Widevine CDM");
+        adapter->RemoveClient();
+        m_client = nullptr;
+        m_adapterLoadFailed = true;
+        return nullptr;
+    }
+
+    m_adapter = WTF::move(adapter);
+    return m_adapter;
+}
+
 void CDMInstanceExternalCDM::initializeWithConfiguration(const CDMKeySystemConfiguration&, AllowDistinctiveIdentifiers distinctiveIdentifiers, AllowPersistentState persistentState, SuccessCallback&& callback)
 {
+    if (isWidevine()) {
+        m_allowPersistentState = persistentState == AllowPersistentState::Yes;
+        callback(CDMInstanceSuccessValue::Succeeded);
+        return;
+    }
+
     SuccessValue succeeded = (distinctiveIdentifiers == AllowDistinctiveIdentifiers::No && persistentState == AllowPersistentState::No)
         ? CDMInstanceSuccessValue::Succeeded : CDMInstanceSuccessValue::Failed;
     callback(succeeded);
 }
 
-void CDMInstanceExternalCDM::setServerCertificate(Ref<SharedBuffer>&&, SuccessCallback&& callback)
+void CDMInstanceExternalCDM::setServerCertificate(Ref<SharedBuffer>&& certificate, SuccessCallback&& callback)
 {
-    callback(CDMInstanceSuccessValue::Failed);
+    if (!isWidevine()) {
+        callback(CDMInstanceSuccessValue::Failed);
+        return;
+    }
+
+    auto adapter = ensureAdapter();
+    if (!adapter) {
+        callback(CDMInstanceSuccessValue::Failed);
+        return;
+    }
+
+    auto data = certificate->extractData();
+    uint32_t promiseId = registerPromise([callback = WTF::move(callback)](bool succeeded) mutable {
+        callback(succeeded ? CDMInstanceSuccessValue::Succeeded : CDMInstanceSuccessValue::Failed);
+    });
+    adapter->SetServerCertificate(promiseId, data.span().data(), static_cast<uint32_t>(data.size()));
 }
 
-void CDMInstanceExternalCDM::setStorageDirectory(const String&)
+void CDMInstanceExternalCDM::setStorageDirectory(const String& storageDirectory)
 {
+    m_storageDirectory = storageDirectory;
+    if (!storageDirectory.isEmpty())
+        FileSystem::makeAllDirectories(storageDirectory);
 }
 
 RefPtr<CDMInstanceSession> CDMInstanceExternalCDM::createSession()
 {
     return adoptRef(new CDMInstanceSessionExternalCDM(*this));
+}
+
+void CDMInstanceExternalCDM::registerPendingSession(CDMInstanceSessionExternalCDM& session)
+{
+    ASSERT(isMainThread());
+    m_pendingSessions.append(WeakPtr { session });
+}
+
+void CDMInstanceExternalCDM::unregisterSession(const String& sessionID)
+{
+    ASSERT(isMainThread());
+    if (!sessionID.isEmpty())
+        m_sessionsByID.remove(sessionID);
+}
+
+RefPtr<CDMInstanceSessionExternalCDM> CDMInstanceExternalCDM::sessionForID(const String& sessionID)
+{
+    auto it = m_sessionsByID.find(sessionID);
+    if (it == m_sessionsByID.end())
+        return nullptr;
+    RefPtr<CDMInstanceSessionProxy> base = it->value.get();
+    if (!base) {
+        m_sessionsByID.remove(it);
+        return nullptr;
+    }
+    return static_cast<CDMInstanceSessionExternalCDM*>(base.get());
+}
+
+RefPtr<CDMInstanceSessionExternalCDM> CDMInstanceExternalCDM::takePendingSession()
+{
+    while (!m_pendingSessions.isEmpty()) {
+        RefPtr<CDMInstanceSessionProxy> base = m_pendingSessions.takeFirst().get();
+        if (base)
+            return static_cast<CDMInstanceSessionExternalCDM*>(base.get());
+    }
+    return nullptr;
+}
+
+void CDMInstanceExternalCDM::dispatchCdmMessage(const String& sessionID, media::CdmAdapterClient::CDMADPMSG msg, Ref<SharedBuffer>&& data)
+{
+    ASSERT(isMainThread());
+
+    RefPtr<CDMInstanceSessionExternalCDM> session = sessionForID(sessionID);
+    if (!session) {
+        session = takePendingSession();
+        if (session) {
+            session->setCdmSessionID(sessionID);
+            m_sessionsByID.set(sessionID, WeakPtr { *session });
+        }
+    }
+
+    if (!session) {
+        LOG(EME, "EME - ExternalCDM - message for unknown session %s dropped", sessionID.utf8().data());
+        return;
+    }
+
+    session->onCdmMessage(msg, WTF::move(data));
+}
+
+void CDMInstanceExternalCDM::dispatchKeyStatusChange(const String& sessionID, Vector<media::CdmAdapterClient::KeyInfo>&& keys)
+{
+    ASSERT(isMainThread());
+
+    RefPtr<CDMInstanceSessionExternalCDM> session = sessionForID(sessionID);
+    if (!session) {
+        session = takePendingSession();
+        if (session) {
+            session->setCdmSessionID(sessionID);
+            m_sessionsByID.set(sessionID, WeakPtr { *session });
+        }
+    }
+
+    if (!session) {
+        LOG(EME, "EME - ExternalCDM - key status change for unknown session %s dropped", sessionID.utf8().data());
+        return;
+    }
+
+    session->onKeyStatusChange(keys);
 }
 
 CDMInstanceSessionExternalCDM::CDMInstanceSessionExternalCDM(CDMInstanceExternalCDM& instance)
@@ -249,7 +535,65 @@ CDMInstanceExternalCDM* CDMInstanceSessionExternalCDM::cdmInstanceExternalCDM() 
     return dynamicDowncast<CDMInstanceExternalCDM>(cdmInstanceProxy().get());
 }
 
-void CDMInstanceSessionExternalCDM::requestLicense(LicenseType, KeyGroupingStrategy, const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&& callback)
+void CDMInstanceSessionExternalCDM::setCdmSessionID(const String& sessionID)
+{
+    ASSERT(isMainThread());
+    m_sessionID = sessionID;
+    if (RefPtr instance = cdmInstanceExternalCDM()) {
+        if (auto adapter = instance->ensureAdapter())
+            m_externalSession = adoptInBoxPtr(new ExternalCdmSession(adapter, sessionID));
+    }
+}
+
+void CDMInstanceSessionExternalCDM::onCdmMessage(media::CdmAdapterClient::CDMADPMSG msg, Ref<SharedBuffer>&& data)
+{
+    ASSERT(isMainThread());
+
+    if (msg != media::CdmAdapterClient::kSessionMessage)
+        return;
+
+    if (m_challengeCallback) {
+        m_challengeCallback(WTF::move(data), m_sessionID, false, Succeeded);
+        return;
+    }
+
+    if (m_client)
+        m_client->sendMessage(CDMMessageType::LicenseRenewal, WTF::move(data));
+}
+
+void CDMInstanceSessionExternalCDM::onKeyStatusChange(const Vector<media::CdmAdapterClient::KeyInfo>& keys)
+{
+    ASSERT(isMainThread());
+
+    RefPtr instance = cdmInstanceExternalCDM();
+    if (!instance)
+        return;
+
+    bool keysChanged = false;
+    for (const auto& key : keys) {
+        KeyIDType keyID;
+        keyID.append(unsafeMakeSpan(key.kid.data(), key.kid.size()));
+        keysChanged |= m_keyStore.add(KeyHandle::create(keyStatusFromCdm(key.status), WTF::move(keyID), BoxPtr<ExternalCdmSession>(m_externalSession)));
+    }
+
+    if (keysChanged)
+        instance->mergeKeysFrom(m_keyStore);
+
+    if (m_client)
+        m_client->updateKeyStatuses(m_keyStore.convertToJSKeyStatusVector());
+}
+
+void CDMInstanceSessionExternalCDM::requestLicense(LicenseType licenseType, KeyGroupingStrategy, const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&& callback)
+{
+    RefPtr instance = cdmInstanceExternalCDM();
+    if (instance && instance->isWidevine()) {
+        requestLicenseWidevine(licenseType, initDataType, WTF::move(initData), WTF::move(callback));
+        return;
+    }
+    requestLicenseClearKey(initDataType, WTF::move(initData), WTF::move(callback));
+}
+
+void CDMInstanceSessionExternalCDM::requestLicenseClearKey(const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&& callback)
 {
     if (RefPtr instance = cdmInstanceExternalCDM())
         m_sessionID = String::number(instance->getNextSessionIdValue());
@@ -270,7 +614,55 @@ void CDMInstanceSessionExternalCDM::requestLicense(LicenseType, KeyGroupingStrat
         });
 }
 
+void CDMInstanceSessionExternalCDM::requestLicenseWidevine(LicenseType licenseType, const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&& callback)
+{
+    ASSERT(isMainThread());
+
+    RefPtr instance = cdmInstanceExternalCDM();
+    auto adapter = instance ? instance->ensureAdapter() : nullptr;
+    if (!adapter) {
+        callback(WTF::move(initData), emptyString(), false, Failed);
+        return;
+    }
+
+    cdm::InitDataType cdmInitDataType = cdm::InitDataType::kCenc;
+    if (equalLettersIgnoringASCIICase(initDataType, "keyids"_s))
+        cdmInitDataType = cdm::InitDataType::kKeyIds;
+    else if (equalLettersIgnoringASCIICase(initDataType, "webm"_s))
+        cdmInitDataType = cdm::InitDataType::kWebM;
+
+    cdm::SessionType cdmSessionType = (licenseType == LicenseType::PersistentLicense)
+        ? cdm::SessionType::kPersistentLicense : cdm::SessionType::kTemporary;
+
+    m_challengeCallback = WTF::move(callback);
+    instance->registerPendingSession(*this);
+
+    // The CDM delivers the challenge through a session message on success, so
+    // only a rejection needs handling here: without it generateRequest() hangs
+    // until the player times out. The session id is learned from the message.
+    uint32_t promiseId = instance->registerPromise([weakThis = WeakPtr { *this }](bool succeeded) mutable {
+        RefPtr protectedThis = weakThis.get();
+        if (!protectedThis || succeeded)
+            return;
+        if (auto callback = std::exchange(protectedThis->m_challengeCallback, { }))
+            callback(SharedBuffer::create(), emptyString(), false, Failed);
+    });
+
+    auto data = initData->extractData();
+    adapter->CreateSessionAndGenerateRequest(promiseId, cdmSessionType, cdmInitDataType, data.span().data(), static_cast<uint32_t>(data.size()));
+}
+
 void CDMInstanceSessionExternalCDM::updateLicense(const String& sessionID, LicenseType, Ref<SharedBuffer>&& response, LicenseUpdateCallback&& callback)
+{
+    RefPtr instance = cdmInstanceExternalCDM();
+    if (instance && instance->isWidevine()) {
+        updateLicenseWidevine(sessionID, WTF::move(response), WTF::move(callback));
+        return;
+    }
+    updateLicenseClearKey(sessionID, WTF::move(response), WTF::move(callback));
+}
+
+void CDMInstanceSessionExternalCDM::updateLicenseClearKey(const String& sessionID, Ref<SharedBuffer>&& response, LicenseUpdateCallback&& callback)
 {
     auto dispatchCallback =
         [weakThis = WeakPtr { *this }, &callback](bool sessionWasClosed, std::optional<KeyStatusVector>&& changedKeys, SuccessValue succeeded) {
@@ -320,6 +712,28 @@ void CDMInstanceSessionExternalCDM::updateLicense(const String& sessionID, Licen
     dispatchCallback(false, std::nullopt, SuccessValue::Failed);
 }
 
+void CDMInstanceSessionExternalCDM::updateLicenseWidevine(const String& sessionID, Ref<SharedBuffer>&& response, LicenseUpdateCallback&& callback)
+{
+    ASSERT(isMainThread());
+    ASSERT_UNUSED(sessionID, sessionID == m_sessionID);
+
+    RefPtr instance = cdmInstanceExternalCDM();
+    auto adapter = instance ? instance->ensureAdapter() : nullptr;
+    if (!adapter || m_sessionID.isEmpty()) {
+        callback(false, std::nullopt, std::nullopt, std::nullopt, Failed);
+        return;
+    }
+
+    // Key statuses arrive separately, through onKeyStatusChange().
+    uint32_t promiseId = instance->registerPromise([callback = WTF::move(callback)](bool succeeded) mutable {
+        callback(false, std::nullopt, std::nullopt, std::nullopt, succeeded ? Succeeded : Failed);
+    });
+
+    auto data = response->extractData();
+    auto sid = m_sessionID.utf8();
+    adapter->UpdateSession(promiseId, sid.data(), sid.length(), data.span().data(), static_cast<uint32_t>(data.size()));
+}
+
 void CDMInstanceSessionExternalCDM::loadSession(LicenseType, const String& sessionID, const String&, LoadSessionCallback&& callback)
 {
     ASSERT_UNUSED(sessionID, sessionID == m_sessionID);
@@ -333,6 +747,25 @@ void CDMInstanceSessionExternalCDM::loadSession(LicenseType, const String& sessi
 
 void CDMInstanceSessionExternalCDM::closeSession(const String&, CloseSessionCallback&& callback)
 {
+    RefPtr instance = cdmInstanceExternalCDM();
+    if (instance && instance->isWidevine()) {
+        auto adapter = instance->ensureAdapter();
+        bool isClosingInCdm = adapter && !m_sessionID.isEmpty();
+        if (isClosingInCdm) {
+            uint32_t promiseId = instance->registerPromise([callback = WTF::move(callback)](bool) mutable {
+                callback();
+            });
+            auto sid = m_sessionID.utf8();
+            adapter->CloseSession(promiseId, sid.data(), sid.length());
+        }
+        instance->unrefAllKeysFrom(m_keyStore);
+        instance->unregisterSession(m_sessionID);
+        m_keyStore.clear();
+        m_externalSession = BoxPtr<ExternalCdmSession>();
+        if (isClosingInCdm)
+            return;
+    }
+
     callOnMainThread([weakThis = WeakPtr { *this }, callback = WTF::move(callback)]() mutable {
         if (!weakThis)
             return;
@@ -368,9 +801,24 @@ void CDMInstanceSessionExternalCDM::removeSessionData(const String& sessionID, L
         message = SharedBuffer::create(messageString.utf8().span());
     }
 
-    if (RefPtr instance = cdmInstanceExternalCDM())
+    RefPtr instance = cdmInstanceExternalCDM();
+    std::shared_ptr<media::CdmAdapter> adapter;
+    if (instance && instance->isWidevine())
+        adapter = instance->ensureAdapter();
+
+    if (instance)
         instance->unrefAllKeysFrom(m_keyStore);
     m_keyStore.clear();
+
+    if (adapter && !m_sessionID.isEmpty()) {
+        uint32_t promiseId = instance->registerPromise([callback = WTF::move(callback), keyStatusVector = WTF::move(keyStatusVector), message = WTF::move(message)](bool succeeded) mutable {
+            callback(WTF::move(keyStatusVector), WTF::move(message), succeeded ? SuccessValue::Succeeded : SuccessValue::Failed);
+        });
+        auto sid = m_sessionID.utf8();
+        adapter->RemoveSession(promiseId, sid.data(), sid.length());
+        return;
+    }
+
     dispatchCallback(WTF::move(keyStatusVector), Ref<SharedBuffer>(*message), SuccessValue::Succeeded);
 }
 

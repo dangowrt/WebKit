@@ -184,6 +184,27 @@ static DecryptionResult decrypt(WebKitMediaCommonEncryptionDecrypt* decryptor, G
     }
     context.cdmProxyDecryptionClient = webKitMediaCommonEncryptionDecryptGetCDMProxyDecryptionClient(decryptor);
 
+    // The CENC base class parses the per-buffer cipher mode from the protection
+    // meta but does not forward it to the subclass, so recover it from the sink
+    // caps for the blob-backed key systems that need the scheme in Decrypt().
+    // ClearKey ignores the scheme (it is always AES-CTR). cbcs pattern counts
+    // are not available through this vfunc, so only the scheme is carried.
+    context.encryptionScheme = cdm::EncryptionScheme::kCenc;
+    if (auto caps = adoptGRef(gst_pad_get_current_caps(GST_BASE_TRANSFORM_SINK_PAD(GST_BASE_TRANSFORM_CAST(decryptor))))) {
+        if (const GstStructure* structure = gst_caps_get_structure(caps.get(), 0)) {
+            if (const char* cipherMode = gst_structure_get_string(structure, "cipher-mode")) {
+                if (!g_ascii_strcasecmp(cipherMode, "cbcs"))
+                    context.encryptionScheme = cdm::EncryptionScheme::kCbcs;
+            }
+            unsigned cryptByteBlock = 0;
+            unsigned skipByteBlock = 0;
+            if (gst_structure_get_uint(structure, "crypt_byte_block", &cryptByteBlock))
+                context.cryptByteBlock = cryptByteBlock;
+            if (gst_structure_get_uint(structure, "skip_byte_block", &skipByteBlock))
+                context.skipByteBlock = skipByteBlock;
+        }
+    }
+
     return priv->cdmProxy->cencDecrypt(context);
 }
 

@@ -33,9 +33,15 @@
 
 #include "CDMClearKey.h"
 #include "Logging.h"
+#include <cstdlib>
 #include <wtf/ByteOrder.h>
 
 namespace WebCore {
+
+void externalCdmSessionDestroy(ExternalCdmSession* session)
+{
+    delete session;
+}
 
 static bool readUInt32(const uint8_t* buffer, size_t bufferSize, size_t& offset, uint32_t& value)
 {
@@ -149,21 +155,9 @@ bool CDMProxyExternalCDM::cencDecryptSubsampled(cencDecryptContext& input)
     return true;
 }
 
-DecryptionResult CDMProxyExternalCDM::cencDecrypt(CDMProxyExternalCDM::cencDecryptContext& input)
+DecryptionResult CDMProxyExternalCDM::clearKeyDecrypt(cencDecryptContext& input, const Vector<uint8_t>& keyValue)
 {
-    Vector<uint8_t> keyIDVec;
-    keyIDVec.append(unsafeMakeSpan(input.keyID, input.keyIDSizeInBytes));
-
-    auto keyData = getOrWaitForKeyValue(keyIDVec, WTF::move(input.cdmProxyDecryptionClient));
-    if (!keyData) {
-        LOG(EME, "EME - CDMProxyExternalCDM - key unavailable or operation aborted");
-        return DecryptionResult::NoKey;
-    }
-
-    ASSERT(std::holds_alternative<Vector<uint8_t>>(keyData.value()));
-    auto& keyDataValue = std::get<Vector<uint8_t>>(keyData.value());
-
-    if (gcry_error_t cipherError = gcry_cipher_setkey(gCryptHandle(), keyDataValue.span().data(), keyDataValue.size())) {
+    if (gcry_error_t cipherError = gcry_cipher_setkey(gCryptHandle(), keyValue.span().data(), keyValue.size())) {
 #if !LOG_DISABLED
         LOG(EME, "EME - CDMProxyExternalCDM - ERROR(gcry_cipher_setkey): %s", gpg_strerror(cipherError));
 #else
@@ -177,6 +171,146 @@ DecryptionResult CDMProxyExternalCDM::cencDecrypt(CDMProxyExternalCDM::cencDecry
 
     bool success = input.isSubsampled() ? cencDecryptSubsampled(input) : cencDecryptFullSample(input);
     return success ? DecryptionResult::Success : DecryptionResult::Failure;
+}
+
+namespace {
+
+class HeapDecryptedBlock final : public cdm::DecryptedBlock {
+public:
+    void SetDecryptedBuffer(cdm::Buffer* buffer) override { m_buffer = buffer; }
+    cdm::Buffer* DecryptedBuffer() override { return m_buffer; }
+    void SetTimestamp(int64_t timestamp) override { m_timestamp = timestamp; }
+    int64_t Timestamp() const override { return m_timestamp; }
+
+private:
+    cdm::Buffer* m_buffer { nullptr };
+    int64_t m_timestamp { 0 };
+};
+
+} // namespace
+
+DecryptionResult CDMProxyExternalCDM::externalCdmDecrypt(cencDecryptContext& input, const BoxPtr<ExternalCdmSession>& session)
+{
+    if (!session || !session->get() || !session->get()->adapter()) {
+        LOG(EME, "EME - CDMProxyExternalCDM - no CDM session to decrypt against");
+        return DecryptionResult::Failure;
+    }
+    media::CdmAdapter* cdm = session->get()->adapter();
+
+    // The Chromium CDM takes the cipher bytes of all subsamples as one
+    // contiguous block with a single subsample entry, exactly as
+    // inputstream.adaptive drives it; the clear bytes are left in place in the
+    // GstBuffer and the decrypted cipher is written back over the cipher
+    // positions (L3, the decrypted data is accessible in process).
+    Vector<std::pair<uint32_t, uint32_t>> layout;
+    Vector<uint8_t> cipher;
+
+    if (input.isSubsampled()) {
+        size_t subOffset = 0;
+        for (size_t i = 0; i < input.numSubsamples; ++i) {
+            uint16_t clearBytes = 0;
+            uint32_t cipherBytes = 0;
+            if (!readUInt16(input.subsamplesBuffer, input.subsamplesBufferSizeInBytes, subOffset, clearBytes)
+                || !readUInt32(input.subsamplesBuffer, input.subsamplesBufferSizeInBytes, subOffset, cipherBytes)) {
+                LOG(EME, "EME - CDMProxyExternalCDM - could not read subsample %zu", i);
+                return DecryptionResult::Failure;
+            }
+            layout.append(std::make_pair(static_cast<uint32_t>(clearBytes), cipherBytes));
+        }
+    } else
+        layout.append(std::make_pair(0u, static_cast<uint32_t>(input.encryptedBufferSizeInBytes)));
+
+    size_t dataOffset = 0;
+    for (const auto& entry : layout) {
+        dataOffset += entry.first;
+        if (entry.second) {
+            if (dataOffset + entry.second > input.encryptedBufferSizeInBytes) {
+                LOG(EME, "EME - CDMProxyExternalCDM - subsample layout overruns the buffer");
+                return DecryptionResult::Failure;
+            }
+            cipher.append(unsafeMakeSpan(input.encryptedBuffer + dataOffset, entry.second));
+            dataOffset += entry.second;
+        }
+    }
+
+    if (cipher.isEmpty())
+        return DecryptionResult::Success;
+
+    uint8_t iv[16];
+    memset(iv, 0, sizeof(iv));
+    memcpy(iv, input.iv, std::min(input.ivSizeInBytes, sizeof(iv)));
+
+    cdm::SubsampleEntry subsample { 0, static_cast<uint32_t>(cipher.size()) };
+
+    cdm::InputBuffer_2 inputBuffer { };
+    inputBuffer.data = cipher.span().data();
+    inputBuffer.data_size = static_cast<uint32_t>(cipher.size());
+    inputBuffer.encryption_scheme = input.encryptionScheme;
+    inputBuffer.key_id = input.keyID;
+    inputBuffer.key_id_size = static_cast<uint32_t>(input.keyIDSizeInBytes);
+    inputBuffer.iv = iv;
+    inputBuffer.iv_size = sizeof(iv);
+    inputBuffer.subsamples = &subsample;
+    inputBuffer.num_subsamples = 1;
+    inputBuffer.pattern = { input.cryptByteBlock, input.skipByteBlock };
+    inputBuffer.timestamp = 0;
+
+    ExternalCdmHeapBuffer output(cipher.size());
+    HeapDecryptedBlock block;
+    block.SetDecryptedBuffer(&output);
+
+    cdm::Status status = cdm->Decrypt(inputBuffer, &block);
+    if (status != cdm::kSuccess) {
+        LOG(EME, "EME - CDMProxyExternalCDM - CDM Decrypt failed, status %d", static_cast<int>(status));
+        return status == cdm::kNoKey ? DecryptionResult::NoKey : DecryptionResult::Failure;
+    }
+
+    if (output.Size() < cipher.size()) {
+        LOG(EME, "EME - CDMProxyExternalCDM - CDM returned %u bytes, expected %zu", output.Size(), cipher.size());
+        return DecryptionResult::Failure;
+    }
+
+    const uint8_t* decrypted = output.Data();
+    size_t cipherOffset = 0;
+    dataOffset = 0;
+    for (const auto& entry : layout) {
+        dataOffset += entry.first;
+        if (entry.second) {
+            memcpy(input.encryptedBuffer + dataOffset, decrypted + cipherOffset, entry.second);
+            dataOffset += entry.second;
+            cipherOffset += entry.second;
+        }
+    }
+
+    return DecryptionResult::Success;
+}
+
+DecryptionResult CDMProxyExternalCDM::cencDecrypt(CDMProxyExternalCDM::cencDecryptContext& input)
+{
+    Vector<uint8_t> keyIDVec;
+    keyIDVec.append(unsafeMakeSpan(input.keyID, input.keyIDSizeInBytes));
+
+    auto keyHandle = getOrWaitForKeyHandle(keyIDVec, WTF::move(input.cdmProxyDecryptionClient));
+    if (!keyHandle) {
+        LOG(EME, "EME - CDMProxyExternalCDM - key unavailable or operation aborted");
+        return DecryptionResult::NoKey;
+    }
+
+    const KeyHandleValueVariant& keyValue = keyHandle.value()->value();
+
+    if (std::holds_alternative<Vector<uint8_t>>(keyValue))
+        return clearKeyDecrypt(input, std::get<Vector<uint8_t>>(keyValue));
+
+    if (std::holds_alternative<BoxPtr<ExternalCdmSession>>(keyValue)) {
+        if (!keyHandle.value()->isStatusCurrentlyValid()) {
+            LOG(EME, "EME - CDMProxyExternalCDM - key present but not usable");
+            return DecryptionResult::NoKey;
+        }
+        return externalCdmDecrypt(input, std::get<BoxPtr<ExternalCdmSession>>(keyValue));
+    }
+
+    LOG(EME, "EME - CDMProxyExternalCDM - key handle carries no usable value");
+    return DecryptionResult::Failure;
 }
 
 void CDMProxyExternalCDM::closeGCryptHandle()

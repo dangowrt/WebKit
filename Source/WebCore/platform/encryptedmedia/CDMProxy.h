@@ -48,6 +48,10 @@
 #include "CDMOpenCDMTypes.h"
 #endif
 
+#if ENABLE(EXTERNAL_CDM)
+#include "CDMExternalCDMTypes.h"
+#endif
+
 namespace WebCore {
 
 class MediaPlayer;
@@ -58,6 +62,9 @@ using KeyHandleValueVariant = Variant<
     Vector<uint8_t>
 #if ENABLE(THUNDER)
     , BoxPtr<OpenCDMSession>
+#endif
+#if ENABLE(EXTERNAL_CDM)
+    , BoxPtr<ExternalCdmSession>
 #endif
 >;
 

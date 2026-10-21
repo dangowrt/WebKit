@@ -468,6 +468,18 @@ static void bindGStreamerData(Vector<CString>& args)
     args.appendList({ "--dev-bind-try", "/dev/udmabuf", "/dev/udmabuf" });
 }
 
+#if ENABLE(EXTERNAL_CDM)
+static void bindExternalCDM(Vector<CString>& args)
+{
+    // The external CDM module is dlopen()ed inside the web process, so the
+    // configured blob must be reachable in the sandbox.
+    const char* cdmPath = g_getenv("WPE_WIDEVINE_CDM_PATH");
+    if (!cdmPath || !*cdmPath)
+        return;
+    bindIfExists(args, cdmPath);
+}
+#endif
+
 static void bindOpenGL(Vector<CString>& args)
 {
     args.appendList({
@@ -953,6 +965,9 @@ GRefPtr<GSubprocess> bubblewrapSpawn(GSubprocessLauncher* launcher, const Proces
         bindSndio(sandboxArgs);
         bindFonts(sandboxArgs);
         bindGStreamerData(sandboxArgs);
+#if ENABLE(EXTERNAL_CDM)
+        bindExternalCDM(sandboxArgs);
+#endif
         bindOpenGL(sandboxArgs);
 
         // Although cameras can be managed via the DesktopPortal, we still need v4l2 for video decoding.

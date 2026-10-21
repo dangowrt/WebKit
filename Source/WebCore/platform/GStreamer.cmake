@@ -193,6 +193,31 @@ if (ENABLE_ENCRYPTED_MEDIA AND ENABLE_THUNDER)
     endif ()
 endif ()
 
+if (ENABLE_ENCRYPTED_MEDIA AND ENABLE_EXTERNAL_CDM)
+    # inputstream.adaptive's Chromium CDM adapter, vendored verbatim and built in
+    # a unit of its own because it uses C++ exceptions and RTTI, which the rest
+    # of WebKit disables globally. Re-enable them here, and pin C++17 as the
+    # upstream project builds it.
+    set(CDM_ADAPTER_DIR "${WEBCORE_DIR}/platform/graphics/gstreamer/eme/cdm")
+    add_library(cdmadapter STATIC
+        "${CDM_ADAPTER_DIR}/media/cdm/cdm_adapter.cc"
+        "${CDM_ADAPTER_DIR}/base/native_library.cc"
+        "${CDM_ADAPTER_DIR}/base/native_library_posix.cc"
+        "${CDM_ADAPTER_DIR}/debug.cpp"
+    )
+    target_include_directories(cdmadapter PRIVATE "${CDM_ADAPTER_DIR}")
+    target_compile_options(cdmadapter PRIVATE -std=c++17 -fexceptions -frtti)
+    set_target_properties(cdmadapter PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+        "${WEBCORE_DIR}/platform/graphics/gstreamer/eme"
+    )
+    list(APPEND WebCore_LIBRARIES
+        cdmadapter
+        ${CMAKE_DL_LIBS}
+    )
+endif ()
+
 if (ENABLE_SPEECH_SYNTHESIS)
     if (USE_SPIEL)
         list(APPEND WebCore_SOURCES

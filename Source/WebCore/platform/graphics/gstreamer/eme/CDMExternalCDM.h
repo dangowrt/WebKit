@@ -34,11 +34,22 @@
 #include "CDMInstanceSession.h"
 #include "CDMPrivate.h"
 #include "CDMProxy.h"
+#include "CDMProxyExternalCDM.h"
 #include "SharedBuffer.h"
+#include "cdm/media/cdm/cdm_adapter.h"
+#include <memory>
+#include <wtf/CompletionHandler.h>
+#include <wtf/Deque.h>
+#include <wtf/HashMap.h>
+#include <wtf/ThreadSafeRefCounted.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/WeakPtr.h>
+#include <wtf/text/WTFString.h>
 
 namespace WebCore {
+
+class CDMInstanceExternalCDM;
+class CDMInstanceSessionExternalCDM;
 
 class CDMFactoryExternalCDM final : public CDMFactory, public CDMProxyFactory {
     WTF_MAKE_TZONE_ALLOCATED(CDMFactoryExternalCDM);
@@ -86,7 +97,34 @@ public:
     std::optional<String> sanitizeSessionId(const String&) const final;
 
 private:
+    bool isWidevine() const;
     String m_keySystem;
+};
+
+// Routes the Chromium CDM's host callbacks, which arrive on CDM-owned threads,
+// onto the main thread and into the owning instance. Kept alive by the posted
+// tasks so a late callback after the instance is gone is a safe no-op.
+class ExternalCdmClient final : public media::CdmAdapterClient, public ThreadSafeRefCounted<ExternalCdmClient> {
+public:
+    static Ref<ExternalCdmClient> create(CDMInstanceExternalCDM& instance)
+    {
+        return adoptRef(*new ExternalCdmClient(instance));
+    }
+
+    // Main thread only.
+    void clearInstance();
+
+    void OnCDMMessage(const char* session, uint32_t session_size, CDMADPMSG, const uint8_t* data, size_t data_size, uint32_t status) final;
+    void OnKeyStatusChange(const std::string& sessionId, const std::vector<KeyInfo>&) final;
+    cdm::Buffer* AllocateBuffer(size_t) final;
+    void OnPromiseResolved(uint32_t promiseId) final;
+    void OnPromiseRejected(uint32_t promiseId, uint32_t systemCode, const std::string& message) final;
+
+private:
+    explicit ExternalCdmClient(CDMInstanceExternalCDM&);
+    // Read only on the main thread; set at construction and cleared by the
+    // instance destructor after the adapter's client has been removed.
+    CDMInstanceExternalCDM* m_instance { nullptr };
 };
 
 class CDMInstanceExternalCDM final : public CDMInstanceProxy {
@@ -94,9 +132,10 @@ class CDMInstanceExternalCDM final : public CDMInstanceProxy {
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(CDMInstanceExternalCDM);
 public:
     CDMInstanceExternalCDM(const String& keySystem);
-    virtual ~CDMInstanceExternalCDM() = default;
+    virtual ~CDMInstanceExternalCDM();
 
     uint32_t getNextSessionIdValue() { return m_nextSessionIdValue++; }
+    bool isWidevine() const;
 
     // CDMInstance
     ImplementationType implementationType() const final { return ImplementationType::ExternalCDM; }
@@ -106,9 +145,36 @@ public:
     const String& keySystem() const LIFETIME_BOUND final { return m_keySystem; }
     RefPtr<CDMInstanceSession> createSession() final;
 
+    // Widevine path, all main thread.
+    std::shared_ptr<media::CdmAdapter> ensureAdapter();
+    uint32_t nextPromiseId() { return m_nextPromiseId++; }
+    using PromiseCallback = CompletionHandler<void(bool succeeded)>;
+    uint32_t registerPromise(PromiseCallback&&);
+    void settlePromise(uint32_t promiseId, bool succeeded);
+    void registerPendingSession(CDMInstanceSessionExternalCDM&);
+    void unregisterSession(const String& sessionID);
+
+    // Called on the main thread by ExternalCdmClient.
+    void dispatchCdmMessage(const String& sessionID, media::CdmAdapterClient::CDMADPMSG, Ref<SharedBuffer>&&);
+    void dispatchKeyStatusChange(const String& sessionID, Vector<media::CdmAdapterClient::KeyInfo>&&);
+
 private:
+    RefPtr<CDMInstanceSessionExternalCDM> sessionForID(const String& sessionID);
+    RefPtr<CDMInstanceSessionExternalCDM> takePendingSession();
+
     String m_keySystem;
     uint32_t m_nextSessionIdValue { 0 };
+
+    std::shared_ptr<media::CdmAdapter> m_adapter;
+    RefPtr<ExternalCdmClient> m_client;
+    String m_storageDirectory;
+    bool m_adapterLoadFailed { false };
+    bool m_allowPersistentState { true };
+    uint32_t m_nextPromiseId { 1 };
+    HashMap<uint32_t, PromiseCallback> m_pendingPromises;
+
+    HashMap<String, WeakPtr<CDMInstanceSessionProxy>> m_sessionsByID;
+    Deque<WeakPtr<CDMInstanceSessionProxy>> m_pendingSessions;
 };
 
 class CDMInstanceSessionExternalCDM final : public CDMInstanceSessionProxy {
@@ -122,11 +188,30 @@ public:
     void removeSessionData(const String&, LicenseType, RemoveSessionDataCallback&&) final;
     void storeRecordOfKeyUsage(const String&) final;
 
+    void setClient(WeakPtr<CDMInstanceSessionClient>&& client) final { m_client = WTF::move(client); }
+    void clearClient() final { m_client.clear(); }
+
+    // Main thread, driven by the instance for the Widevine path.
+    void setCdmSessionID(const String& sessionID);
+    const String& cdmSessionID() const LIFETIME_BOUND { return m_sessionID; }
+    void onCdmMessage(media::CdmAdapterClient::CDMADPMSG, Ref<SharedBuffer>&&);
+    void onKeyStatusChange(const Vector<media::CdmAdapterClient::KeyInfo>&);
+
 private:
     CDMInstanceExternalCDM* cdmInstanceExternalCDM() const;
 
+    void requestLicenseClearKey(const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&&);
+    void requestLicenseWidevine(LicenseType, const String& initDataType, Ref<SharedBuffer>&& initData, LicenseCallback&&);
+    void updateLicenseClearKey(const String&, Ref<SharedBuffer>&&, LicenseUpdateCallback&&);
+    void updateLicenseWidevine(const String&, Ref<SharedBuffer>&&, LicenseUpdateCallback&&);
+
     String m_sessionID;
     KeyStore m_keyStore;
+
+    // Widevine only.
+    BoxPtr<ExternalCdmSession> m_externalSession;
+    LicenseCallback m_challengeCallback;
+    WeakPtr<CDMInstanceSessionClient> m_client;
 };
 
 } // namespace WebCore

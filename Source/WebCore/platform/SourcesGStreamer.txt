@@ -82,9 +82,9 @@ platform/graphics/gstreamer/VideoTrackPrivateGStreamer.cpp
 platform/graphics/gstreamer/WebKitAudioSinkGStreamer.cpp
 platform/graphics/gstreamer/WebKitWebSourceGStreamer.cpp
 
-platform/graphics/gstreamer/eme/CDMExternalCDM.cpp
+platform/graphics/gstreamer/eme/CDMExternalCDM.cpp @no-unify
 platform/graphics/gstreamer/eme/CDMFactoryGStreamer.cpp
-platform/graphics/gstreamer/eme/CDMProxyExternalCDM.cpp
+platform/graphics/gstreamer/eme/CDMProxyExternalCDM.cpp @no-unify
 platform/graphics/gstreamer/eme/CDMProxyThunder.cpp
 platform/graphics/gstreamer/eme/CDMThunder.cpp
 platform/graphics/gstreamer/eme/GStreamerEMEUtilities.cpp
