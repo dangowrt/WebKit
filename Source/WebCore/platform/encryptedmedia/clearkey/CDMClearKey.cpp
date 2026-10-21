@@ -57,7 +57,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(CDMFactoryClearKey);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CDMPrivateClearKey);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CDMInstanceClearKey);
 
-static std::optional<Vector<Ref<KeyHandle>>> parseLicenseFormat(const JSON::Object& root)
+std::optional<Vector<Ref<KeyHandle>>> ClearKey::parseLicenseFormat(const JSON::Object& root)
 {
     // If the 'keys' key is present in the root object, parse the JSON further
     // according to the specified 'license' format.
@@ -105,7 +105,7 @@ static std::optional<Vector<Ref<KeyHandle>>> parseLicenseFormat(const JSON::Obje
     return decodedKeys;
 }
 
-static bool parseLicenseReleaseAcknowledgementFormat(const JSON::Object& root)
+bool ClearKey::parseLicenseReleaseAcknowledgementFormat(const JSON::Object& root)
 {
     // If the 'kids' key is present in the root object, parse the JSON further
     // according to the specified 'license release acknowledgement' format.
@@ -204,7 +204,7 @@ static bool isCencInitData(const SharedBuffer& initData)
     return ((keyIdsMap.first) && (keyIdsMap.second));
 }
 
-static CDMKeyID extractKeyidsFromCencInitData(const SharedBuffer& initData)
+CDMKeyID ClearKey::extractKeyidsFromCencInitData(const SharedBuffer& initData)
 {
     std::pair<unsigned, unsigned> keyIdsMap = extractKeyidsLocationFromCencInitData(initData);
     unsigned keyIdCount = keyIdsMap.first;
@@ -233,7 +233,7 @@ static CDMKeyID extractKeyidsFromCencInitData(const SharedBuffer& initData)
     return SharedBuffer::create(object->toJSONString().utf8().span());
 }
 
-static CDMKeyID extractKeyIdFromWebMInitData(const SharedBuffer& initData)
+CDMKeyID ClearKey::extractKeyIdFromWebMInitData(const SharedBuffer& initData)
 {
     // Check if initData is a valid WebM initData.
     if (initData.isEmpty() || initData.size() > std::numeric_limits<unsigned>::max())
@@ -458,10 +458,10 @@ void CDMInstanceSessionClearKey::requestLicense(LicenseType, KeyGroupingStrategy
         m_sessionID = emptyString();
 
     if (equalLettersIgnoringASCIICase(initDataType, "cenc"_s))
-        initData = extractKeyidsFromCencInitData(initData.get());
+        initData = ClearKey::extractKeyidsFromCencInitData(initData.get());
 
     if (equalLettersIgnoringASCIICase(initDataType, "webm"_s))
-        initData = extractKeyIdFromWebMInitData(initData.get());
+        initData = ClearKey::extractKeyIdFromWebMInitData(initData.get());
 
     callOnMainThread(
         [sessionID = m_sessionID, callback = WTF::move(callback), initData = WTF::move(initData)]() mutable {
@@ -504,7 +504,7 @@ void CDMInstanceSessionClearKey::updateLicense(const String& sessionId, LicenseT
 
     LOG_WITH_STREAM(EME, stream << "EME - ClearKey - updating license for session "_s << sessionId << " which currently contains "_s << m_keyStore.numKeys() << " keys"_s);
 
-    if (auto decodedKeys = parseLicenseFormat(*root)) {
+    if (auto decodedKeys = ClearKey::parseLicenseFormat(*root)) {
         bool keysChanged = m_keyStore.addKeys(WTF::move(*decodedKeys));
 
         LOG_WITH_STREAM(EME, stream << "EME - ClearKey - session "_s << sessionId << " has "_s << m_keyStore.numKeys() << " keys after update()"_s);
@@ -520,7 +520,7 @@ void CDMInstanceSessionClearKey::updateLicense(const String& sessionId, LicenseT
         return;
     }
 
-    if (parseLicenseReleaseAcknowledgementFormat(*root)) {
+    if (ClearKey::parseLicenseReleaseAcknowledgementFormat(*root)) {
         LOG_WITH_STREAM(EME, stream << "EME - ClearKey - session "_s << sessionId << " release acknowledged, clearing all known keys"_s);
         parentInstance->unrefAllKeysFrom(m_keyStore);
         m_keyStore.clear();
