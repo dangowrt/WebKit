@@ -258,12 +258,67 @@ static std::unique_ptr<CoordinatedPlatformLayerBuffer> importYUV(const Ref<DMABu
         yuvToRgbColorSpace, transferFunction, attributes.size, flags, nullptr);
 }
 
+#if USE(GSTREAMER)
+static bool formatSupportsSingleImageImport(const DMABufBuffer::Attributes& attributes)
+{
+    // Restrict to NV12, the format reported and exercised on this path. The gate
+    // is per-format so NV21 and P010 can be added once each is verified.
+    if (attributes.fourcc.value != DRM_FORMAT_NV12)
+        return false;
+
+    const auto& formats = PlatformDisplay::sharedDisplay().glDisplay().bufferFormatsForVideo();
+    for (const auto& format : formats) {
+        if (format.fourcc.value != attributes.fourcc.value)
+            continue;
+        return format.modifiers.contains(attributes.modifier)
+            || format.modifiers.contains(static_cast<uint64_t>(DRM_FORMAT_MOD_INVALID))
+            || attributes.modifier == DRM_FORMAT_MOD_INVALID;
+    }
+    return false;
+}
+
+static std::unique_ptr<CoordinatedPlatformLayerBuffer> importSingleImageYUV(const Ref<DMABufBuffer>& dmabuf, OptionSet<TextureMapperFlags> flags)
+{
+    const auto& attributes = dmabuf->attributes();
+    if (!formatSupportsSingleImageImport(attributes))
+        return nullptr;
+
+    // The external sampler performs YUV to RGB conversion from the EGL colour
+    // space and sample range hints, so both must be expressible by EGL.
+    auto colorSpace = dmabuf->colorSpace().value_or(DMABufBuffer::ColorSpace::Bt601);
+    if (colorSpace == DMABufBuffer::ColorSpace::Smpte240M)
+        return nullptr;
+    auto sampleRange = dmabuf->sampleRange().value_or(DMABufBuffer::SampleRange::Narrow);
+
+    OptionSet<BitmapTexture::Flags> textureFlags;
+    if (flags.contains(TextureMapperFlags::ShouldBlend))
+        textureFlags.add(BitmapTexture::Flags::SupportsAlpha);
+
+    auto texture = importToTexture(attributes.size, attributes, textureFlags, colorSpace, sampleRange);
+    if (!texture)
+        return nullptr;
+
+    return CoordinatedPlatformLayerBufferExternalOES::create(texture.releaseNonNull(), flags, nullptr);
+}
+#endif // USE(GSTREAMER)
+
 std::unique_ptr<CoordinatedPlatformLayerBuffer> CoordinatedPlatformLayerBufferDMABuf::importDMABuf() const
 {
     bool importWithHints = m_dmabuf->colorSpace() && m_dmabuf->sampleRange();
     const auto& attributes = m_dmabuf->attributes();
-    if (!importWithHints && formatIsYUV(attributes.fourcc.value))
-        return importYUV(m_dmabuf, m_flags);
+    if (!importWithHints && formatIsYUV(attributes.fourcc.value)) {
+        if (auto buffer = importYUV(m_dmabuf, m_flags))
+            return buffer;
+#if USE(GSTREAMER)
+        // Per-plane import fails on GPUs that hold a standalone plane to a
+        // stricter row alignment than a multiplanar image (panfrost: 64 bytes
+        // for a lone R8 plane against 16 for NV12). Retry those frames as a
+        // single multiplanar image.
+        if (auto buffer = importSingleImageYUV(m_dmabuf, m_flags))
+            return buffer;
+#endif
+        return nullptr;
+    }
 
     OptionSet<BitmapTexture::Flags> textureFlags;
     if (m_flags.contains(TextureMapperFlags::ShouldBlend))
