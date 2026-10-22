@@ -33,8 +33,12 @@
 #include "GUniquePtrSoup.h"
 #include "Logging.h"
 #include "WebKitAutoconfigProxyResolver.h"
+#include <arpa/inet.h>
 #include <glib/gstdio.h>
+#include <ifaddrs.h>
 #include <libsoup/soup.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <pal/crypto/CryptoDigest.h>
 #include <wtf/FileSystem.h>
 #include <wtf/HashSet.h>
@@ -44,6 +48,7 @@
 #include <wtf/glib/GSpanExtras.h>
 #include <wtf/text/Base64.h>
 #include <wtf/text/CString.h>
+#include <wtf/text/StringToIntegerConversion.h>
 
 namespace WebCore {
 
@@ -300,6 +305,142 @@ void SoupNetworkSession::setProxySettings(const SoupNetworkProxySettings& settin
 
     soup_session_set_proxy_resolver(m_soupSession.get(), resolver.get());
     soup_session_abort(m_soupSession.get());
+}
+
+static GRefPtr<GInetAddress> inetAddressForInterface(struct ifaddrs* entry)
+{
+    auto* address = reinterpret_cast<struct sockaddr_in*>(entry->ifa_addr);
+    return adoptGRef(g_inet_address_new_from_bytes(reinterpret_cast<const guint8*>(&address->sin_addr), G_SOCKET_FAMILY_IPV4));
+}
+
+template<typename MatchFunction>
+static GRefPtr<GInetAddress> firstUpIPv4Interface(const MatchFunction& matches)
+{
+    struct ifaddrs* interfaces = nullptr;
+    if (getifaddrs(&interfaces))
+        return nullptr;
+
+    GRefPtr<GInetAddress> result;
+    for (struct ifaddrs* entry = interfaces; entry; entry = entry->ifa_next) {
+        if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET)
+            continue;
+        if (!(entry->ifa_flags & IFF_UP))
+            continue;
+        if (!matches(entry))
+            continue;
+        result = inetAddressForInterface(entry);
+        break;
+    }
+
+    freeifaddrs(interfaces);
+    return result;
+}
+
+static GRefPtr<GInetAddress> resolveUplinkSubnet(const CString& addressText, unsigned prefixLength)
+{
+    struct in_addr subnet;
+    if (inet_pton(AF_INET, addressText.data(), &subnet) != 1)
+        return nullptr;
+
+    uint32_t subnetBits = ntohl(subnet.s_addr);
+    uint32_t mask = prefixLength ? (~uint32_t { 0 } << (32 - prefixLength)) : 0;
+
+    return firstUpIPv4Interface([&](struct ifaddrs* entry) {
+        auto* address = reinterpret_cast<struct sockaddr_in*>(entry->ifa_addr);
+        return (ntohl(address->sin_addr.s_addr) & mask) == (subnetBits & mask);
+    });
+}
+
+static GRefPtr<GInetAddress> resolveUplinkInterface(const CString& interfaceName)
+{
+    return firstUpIPv4Interface([&](struct ifaddrs* entry) {
+        return !g_strcmp0(entry->ifa_name, interfaceName.data());
+    });
+}
+
+// Resolve an uplink specification to the local IPv4 address a connection should
+// leave through, matching kodi-pvr-iptvsimple's uplinkAddress semantics. The
+// resolution is repeated for every connection so a lease change is followed.
+static GRefPtr<GInetAddress> resolveUplinkAddress(const String& uplink)
+{
+    if (uplink.isEmpty())
+        return nullptr;
+
+    size_t slashPosition = uplink.find('/');
+    if (slashPosition != notFound) {
+        auto prefixLength = parseInteger<unsigned>(StringView(uplink).substring(slashPosition + 1), 10, WTF::ParseIntegerWhitespacePolicy::Disallow);
+        if (!prefixLength || *prefixLength > 32)
+            return nullptr;
+        return resolveUplinkSubnet(uplink.left(slashPosition).utf8(), *prefixLength);
+    }
+
+    CString uplinkText = uplink.utf8();
+    GRefPtr<GInetAddress> literal = adoptGRef(g_inet_address_new_from_string(uplinkText.data()));
+    if (literal) {
+        if (g_inet_address_get_family(literal.get()) == G_SOCKET_FAMILY_IPV4)
+            return literal;
+        return nullptr;
+    }
+
+    return resolveUplinkInterface(uplinkText);
+}
+
+void SoupNetworkSession::bindConnectionToUplink(GIOStream* connection)
+{
+    if (m_uplink.isEmpty())
+        return;
+
+    if (!G_IS_SOCKET_CONNECTION(connection))
+        return;
+
+    GSocket* socket = g_socket_connection_get_socket(G_SOCKET_CONNECTION(connection));
+    if (!socket)
+        return;
+
+    // A reused SoupMessage can carry the network-event handler more than once, so
+    // ignore a socket that already carries a non-wildcard bind of ours.
+    GRefPtr<GSocketAddress> boundAddress = adoptGRef(g_socket_get_local_address(socket, nullptr));
+    if (boundAddress && G_IS_INET_SOCKET_ADDRESS(boundAddress.get())
+        && !g_inet_address_get_is_any(g_inet_socket_address_get_address(G_INET_SOCKET_ADDRESS(boundAddress.get()))))
+        return;
+
+    // The resolver is IPv4 only, so an IPv6 attempt can never match the uplink.
+    // Closing the socket fails this attempt and lets happy eyeballs fall back to IPv4.
+    if (g_socket_get_family(socket) != G_SOCKET_FAMILY_IPV4) {
+        g_socket_close(socket, nullptr);
+        return;
+    }
+
+    GRefPtr<GInetAddress> localAddress = resolveUplinkAddress(m_uplink);
+    if (!localAddress) {
+        // The uplink is down: fail the connection instead of leaving through the
+        // default route, so the loss stays visible.
+        RELEASE_LOG_ERROR(Network, "Uplink \"%s\" could not be resolved; failing connection", m_uplink.utf8().data());
+        g_socket_close(socket, nullptr);
+        return;
+    }
+
+    GRefPtr<GSocketAddress> bindAddress = adoptGRef(g_inet_socket_address_new(localAddress.get(), 0));
+    GUniqueOutPtr<GError> error;
+    if (!g_socket_bind(socket, bindAddress.get(), FALSE, &error.outPtr())) {
+        RELEASE_LOG_ERROR(Network, "Failed to bind connection to uplink \"%s\": %s", m_uplink.utf8().data(), error->message);
+        g_socket_close(socket, nullptr);
+    }
+}
+
+void SoupNetworkSession::setUplink(const String& uplink)
+{
+    m_uplink = uplink;
+    if (m_uplink.isEmpty())
+        return;
+
+    g_signal_connect(m_soupSession.get(), "request-queued", G_CALLBACK(+[](SoupSession*, SoupMessage* message, gpointer userData) {
+        g_signal_connect(message, "network-event", G_CALLBACK(+[](SoupMessage*, GSocketClientEvent event, GIOStream* connection, gpointer userData) {
+            if (event != G_SOCKET_CLIENT_CONNECTING)
+                return;
+            static_cast<SoupNetworkSession*>(userData)->bindConnectionToUplink(connection);
+        }), userData);
+    }), this);
 }
 
 void SoupNetworkSession::setInitialAcceptLanguages(const UTF8CString& languages)

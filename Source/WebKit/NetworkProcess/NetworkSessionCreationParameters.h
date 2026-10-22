@@ -74,6 +74,7 @@ struct NetworkSessionCreationParameters {
     bool persistentCredentialStorageEnabled { true };
     bool ignoreTLSErrors { false };
     WebCore::SoupNetworkProxySettings proxySettings;
+    String uplink;
     WebCore::HTTPCookieAcceptPolicy cookieAcceptPolicy { WebCore::HTTPCookieAcceptPolicy::ExclusivelyFromMainDocumentDomain };
 #endif
 #if USE(CURL)

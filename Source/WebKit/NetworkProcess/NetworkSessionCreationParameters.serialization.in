@@ -47,6 +47,7 @@ enum class WebKit::AllowsCellularAccess : bool;
     bool persistentCredentialStorageEnabled;
     bool ignoreTLSErrors;
     WebCore::SoupNetworkProxySettings proxySettings;
+    String uplink;
     WebCore::HTTPCookieAcceptPolicy cookieAcceptPolicy;
 #endif
 #if USE(CURL)
