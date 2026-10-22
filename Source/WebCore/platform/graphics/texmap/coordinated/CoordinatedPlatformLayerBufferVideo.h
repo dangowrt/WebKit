@@ -60,6 +60,7 @@ private:
 
     Ref<VideoFrameGStreamer> m_videoFrame;
     std::optional<GstMappedFrame> m_mappedVideoFrame;
+    std::optional<GstMappedFrame> m_repackMappedFrame;
     std::optional<GstVideoDecoderPlatform> m_videoDecoderPlatform;
     std::unique_ptr<CoordinatedPlatformLayerBuffer> m_buffer;
 };

@@ -27,6 +27,8 @@
 
 #if USE(COORDINATED_GRAPHICS) && USE(GBM)
 #include "CoordinatedPlatformLayerBuffer.h"
+#include <span>
+#include <wtf/Function.h>
 #include <wtf/unix/UnixFileDescriptor.h>
 
 namespace WebCore {
@@ -42,6 +44,12 @@ public:
     CoordinatedPlatformLayerBufferDMABuf(Ref<DMABufBuffer>&&, OptionSet<TextureMapperFlags>, WTF::UnixFileDescriptor&&);
     virtual ~CoordinatedPlatformLayerBufferDMABuf();
 
+    // Provides CPU-readable rows for a YUV plane whose standalone DMABuf import the GPU
+    // rejected, so the plane can be repacked at an accepted stride. Set by the owner that
+    // has access to the source frame; invoked only when a plane's zero-copy import fails.
+    using YUVPlaneSourceFunction = Function<std::span<const uint8_t>(unsigned planeIndex, unsigned& stride)>;
+    void setYUVPlaneSource(YUVPlaneSourceFunction&& source) { m_yuvPlaneSource = WTF::move(source); }
+
 private:
     void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix& modelViewMatrix = TransformationMatrix(), float opacity = 1.0) override;
 
@@ -49,10 +57,12 @@ private:
     sk_sp<SkImage> skiaImage() override;
 #endif
 
-    std::unique_ptr<CoordinatedPlatformLayerBuffer> importDMABuf() const;
-    std::unique_ptr<CoordinatedPlatformLayerBuffer> importYUV() const;
+    std::unique_ptr<CoordinatedPlatformLayerBuffer> importDMABuf(bool& containsCopy) const;
+    std::unique_ptr<CoordinatedPlatformLayerBuffer> importYUV(bool& containsCopy) const;
 
     const Ref<DMABufBuffer> m_dmabuf;
+    YUVPlaneSourceFunction m_yuvPlaneSource;
+    std::unique_ptr<CoordinatedPlatformLayerBuffer> m_copiedBuffer;
     WTF::UnixFileDescriptor m_fenceFD;
 };
 
