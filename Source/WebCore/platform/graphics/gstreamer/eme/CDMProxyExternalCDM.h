@@ -117,6 +117,7 @@ public:
         cdm::EncryptionScheme encryptionScheme { cdm::EncryptionScheme::kCenc };
         uint32_t cryptByteBlock { 0 };
         uint32_t skipByteBlock { 0 };
+        int64_t timestampUs { 0 };
 
         bool isSubsampled() const { return numSubsamples; }
     };
