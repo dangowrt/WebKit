@@ -146,50 +146,61 @@ static DecryptionResult decrypt(WebKitMediaCommonEncryptionDecrypt* decryptor, G
         return DecryptionResult::Failure;
     }
 
-    GstMappedBuffer mappedIVBuffer(ivBuffer, GST_MAP_READ);
-    if (!mappedIVBuffer) {
-        GST_ERROR_OBJECT(self, "failed to map IV buffer");
-        return DecryptionResult::Failure;
-    }
-
-    GstMappedBuffer mappedKeyIdBuffer(keyIDBuffer, GST_MAP_READ);
-    if (!mappedKeyIdBuffer) {
-        GST_ERROR_OBJECT(self, "failed to map key ID buffer");
-        return DecryptionResult::Failure;
-    }
-
-    GstMappedBuffer mappedBuffer(buffer, GST_MAP_READWRITE);
-    if (!mappedBuffer) {
-        GST_ERROR_OBJECT(self, "failed to map data buffer");
-        return DecryptionResult::Failure;
-    }
-
-    std::optional<GstMappedBuffer> mappedSubsamplesBuffer;
-    CDMProxyExternalCDM::cencDecryptContext context = { };
-    context.keyID = mappedKeyIdBuffer.data();
-    context.keyIDSizeInBytes = mappedKeyIdBuffer.size();
-    context.iv = mappedIVBuffer.data();
-    context.ivSizeInBytes = mappedIVBuffer.size();
-    context.encryptedBuffer = mappedBuffer.data();
-    context.encryptedBufferSizeInBytes = mappedBuffer.size();
-    context.numSubsamples = subsampleCount;
-    if (subsampleCount) {
-        mappedSubsamplesBuffer.emplace(subsamplesBuffer, GST_MAP_READ);
-        if (!*mappedSubsamplesBuffer) {
-            GST_ERROR_OBJECT(self, "failed to map subsamples buffer");
-            return DecryptionResult::Failure;
-        }
-        context.subsamplesBuffer = mappedSubsamplesBuffer->data();
-        context.subsamplesBufferSizeInBytes = mappedSubsamplesBuffer->size();
-    }
-    context.cdmProxyDecryptionClient = webKitMediaCommonEncryptionDecryptGetCDMProxyDecryptionClient(decryptor);
-
-    if (GST_BUFFER_PTS_IS_VALID(buffer))
-        context.timestampUs = GST_TIME_AS_USECONDS(GST_BUFFER_PTS(buffer));
-
+    WebKitMediaCommonEncryptionSampleInfo sampleInfo { ivBuffer, keyIDBuffer, subsamplesBuffer, subsampleCount, true };
+    WebKitExternalCDMDecryptInput input;
     // The base class strips the protection meta only after decrypt() returns.
+    if (!input.map(GST_ELEMENT_CAST(self), buffer, GST_MAP_READWRITE, sampleInfo))
+        return DecryptionResult::Failure;
+    input.context.cdmProxyDecryptionClient = webKitMediaCommonEncryptionDecryptGetCDMProxyDecryptionClient(decryptor);
+
+    return priv->cdmProxy->cencDecrypt(input.context);
+}
+
+bool WebKitExternalCDMDecryptInput::map(GstElement* element, GstBuffer* sample, GstMapFlags flags, const WebKitMediaCommonEncryptionSampleInfo& sampleInfo)
+{
+    m_sample.emplace(sample, flags);
+    if (!*m_sample) {
+        GST_ERROR_OBJECT(element, "failed to map data buffer");
+        return false;
+    }
+    context.encryptedBuffer = m_sample->data();
+    context.encryptedBufferSizeInBytes = m_sample->size();
+
+    if (GST_BUFFER_PTS_IS_VALID(sample))
+        context.timestampUs = GST_TIME_AS_USECONDS(GST_BUFFER_PTS(sample));
+
+    if (!sampleInfo.isEncrypted)
+        return true;
+
+    m_iv.emplace(sampleInfo.ivBuffer, GST_MAP_READ);
+    if (!*m_iv) {
+        GST_ERROR_OBJECT(element, "failed to map IV buffer");
+        return false;
+    }
+
+    m_keyID.emplace(sampleInfo.keyIDBuffer, GST_MAP_READ);
+    if (!*m_keyID) {
+        GST_ERROR_OBJECT(element, "failed to map key ID buffer");
+        return false;
+    }
+
+    context.keyID = m_keyID->data();
+    context.keyIDSizeInBytes = m_keyID->size();
+    context.iv = m_iv->data();
+    context.ivSizeInBytes = m_iv->size();
+    context.numSubsamples = sampleInfo.subsampleCount;
+    if (sampleInfo.subsampleCount) {
+        m_subsamples.emplace(sampleInfo.subsamplesBuffer, GST_MAP_READ);
+        if (!*m_subsamples) {
+            GST_ERROR_OBJECT(element, "failed to map subsamples buffer");
+            return false;
+        }
+        context.subsamplesBuffer = m_subsamples->data();
+        context.subsamplesBufferSizeInBytes = m_subsamples->size();
+    }
+
     context.encryptionScheme = cdm::EncryptionScheme::kCenc;
-    if (auto* protectionMeta = reinterpret_cast<GstProtectionMeta*>(gst_buffer_get_protection_meta(buffer))) {
+    if (auto* protectionMeta = reinterpret_cast<GstProtectionMeta*>(gst_buffer_get_protection_meta(sample))) {
         if (const char* cipherMode = gst_structure_get_string(protectionMeta->info, "cipher-mode")) {
             if (!g_ascii_strcasecmp(cipherMode, "cbcs"))
                 context.encryptionScheme = cdm::EncryptionScheme::kCbcs;
@@ -201,8 +212,7 @@ static DecryptionResult decrypt(WebKitMediaCommonEncryptionDecrypt* decryptor, G
         if (gst_structure_get_uint(protectionMeta->info, "skip_byte_block", &skipByteBlock))
             context.skipByteBlock = skipByteBlock;
     }
-
-    return priv->cdmProxy->cencDecrypt(context);
+    return true;
 }
 
 #undef GST_CAT_DEFAULT

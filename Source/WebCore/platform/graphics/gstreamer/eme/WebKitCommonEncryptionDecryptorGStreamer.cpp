@@ -76,8 +76,6 @@ struct _WebKitMediaCommonEncryptionDecryptPrivate {
     enum DecryptionState decryptionState { DecryptionState::Idle };
 };
 
-static constexpr Seconds MaxSecondsToWaitForCDMProxy = 5_s;
-
 static void constructed(GObject*);
 static GstStateChangeReturn changeState(GstElement*, GstStateChange transition);
 static GstCaps* transformCaps(GstBaseTransform*, GstPadDirection, GstCaps*, GstCaps*);
@@ -127,6 +125,15 @@ static void constructed(GObject* object)
     priv->cdmProxyDecryptionClientImplementation = makeUnique<CDMProxyDecryptionClientImplementation>(self);
 }
 
+void webKitMediaCommonEncryptionStripProtection(GstStructure* structure)
+{
+    if (auto originalMediaType = WebCore::gstStructureGetString(structure, "original-media-type"_s))
+        gst_structure_set_name(structure, originalMediaType.utf8());
+
+    // Filter out the DRM related fields from the down-stream caps.
+    gst_structure_remove_fields(structure, "protection-system", "original-media-type", "encryption-algorithm", "encoding-scope", "cipher-mode", nullptr);
+}
+
 static GstCaps* transformCaps(GstBaseTransform* base, GstPadDirection direction, GstCaps* caps, GstCaps* filter)
 {
     if (direction == GST_PAD_UNKNOWN)
@@ -157,15 +164,7 @@ static GstCaps* transformCaps(GstBaseTransform* base, GstPadDirection direction,
             }
 
             outgoingStructure = GUniquePtr<GstStructure>(gst_structure_copy(incomingStructure));
-
-            if (!canDoPassthrough) {
-                auto originalMediaType = WebCore::gstStructureGetString(outgoingStructure.get(), "original-media-type"_s);
-                RELEASE_ASSERT(originalMediaType);
-                gst_structure_set_name(outgoingStructure.get(), originalMediaType.utf8());
-            }
-
-            // Filter out the DRM related fields from the down-stream caps.
-            gst_structure_remove_fields(outgoingStructure.get(), "protection-system", "original-media-type", "encryption-algorithm", "encoding-scope", "cipher-mode", nullptr);
+            webKitMediaCommonEncryptionStripProtection(outgoingStructure.get());
         } else {
             outgoingStructure = GUniquePtr<GstStructure>(gst_structure_copy(incomingStructure));
             if (!gst_base_transform_is_passthrough(base)) {
@@ -232,6 +231,90 @@ static gboolean acceptCaps(GstBaseTransform* trans, GstPadDirection direction, G
     return result;
 }
 
+bool webKitMediaCommonEncryptionParseProtectionMeta(GstElement* element, GstProtectionMeta* protectionMeta, WebKitMediaCommonEncryptionSampleInfo& sampleInfo)
+{
+    bool isCbcs = false;
+    if (auto cipherMode = WebCore::gstStructureGetString(protectionMeta->info, "cipher-mode"_s))
+        isCbcs = WTF::equalIgnoringASCIICase(cipherMode.span(), "cbcs"_s);
+
+    auto ivSizeFromMeta = WebCore::gstStructureGet<unsigned>(protectionMeta->info, "iv_size"_s);
+    if (!ivSizeFromMeta) {
+        GST_ELEMENT_ERROR(element, STREAM, FAILED, ("Failed to get iv_size"), (nullptr));
+        return false;
+    }
+
+    unsigned ivSize;
+    if (*ivSizeFromMeta)
+        ivSize = *ivSizeFromMeta;
+    else {
+        auto constantIvSize = WebCore::gstStructureGet<unsigned>(protectionMeta->info, "constant_iv_size"_s);
+        if (!constantIvSize) {
+            GST_ELEMENT_ERROR(element, STREAM, FAILED, ("No iv_size and failed to get constant_iv_size"), (nullptr));
+            ASSERT(isCbcs);
+            return false;
+        }
+        ivSize = *constantIvSize;
+    }
+
+    auto isEncrypted = WebCore::gstStructureGet<bool>(protectionMeta->info, "encrypted"_s);
+    if (!isEncrypted) {
+        GST_ELEMENT_ERROR(element, STREAM, FAILED, ("Failed to get encrypted flag"), (nullptr));
+        return false;
+    }
+
+    if (!ivSize || !*isEncrypted) {
+        GST_TRACE_OBJECT(element, "iv size %u, encrypted %s, bailing out OK as unencrypted", ivSize, boolForPrinting(*isEncrypted));
+        sampleInfo.isEncrypted = false;
+        return true;
+    }
+
+    GST_DEBUG_OBJECT(element, "protection meta: %" GST_PTR_FORMAT, protectionMeta->info);
+
+    auto subSampleCountFromMeta = WebCore::gstStructureGet<unsigned>(protectionMeta->info, "subsample_count"_s);
+    // cbcs could not include the subsample_count.
+    if (!subSampleCountFromMeta && !isCbcs) {
+        GST_ELEMENT_ERROR(element, STREAM, FAILED, ("Failed to get subsample_count"), (nullptr));
+        return false;
+    }
+
+    const GValue* value;
+    GstBuffer* subSamplesBuffer = nullptr;
+    auto subSampleCount = subSampleCountFromMeta.value_or(0);
+    if (subSampleCount) {
+        value = gst_structure_get_value(protectionMeta->info, "subsamples");
+        if (!value) {
+            GST_ELEMENT_ERROR(element, STREAM, FAILED, ("Failed to get subsamples"), (nullptr));
+            return false;
+        }
+        subSamplesBuffer = gst_value_get_buffer(value);
+        if (!subSamplesBuffer) {
+            GST_ELEMENT_ERROR(element, STREAM, FAILED, ("There is no subsamples buffer, but a positive subsample count"), (nullptr));
+            return false;
+        }
+    }
+
+    value = gst_structure_get_value(protectionMeta->info, "kid");
+
+    if (!value) {
+        GST_ELEMENT_ERROR(element, STREAM, FAILED, ("Failed to get key id for buffer"), (nullptr));
+        return false;
+    }
+    GstBuffer* keyIDBuffer = gst_value_get_buffer(value);
+
+    value = gst_structure_get_value(protectionMeta->info, "iv");
+    if (!value) {
+        GST_ELEMENT_ERROR(element, STREAM, FAILED, ("Failed to get IV for sample"), (nullptr));
+        return false;
+    }
+
+    sampleInfo.ivBuffer = gst_value_get_buffer(value);
+    sampleInfo.keyIDBuffer = keyIDBuffer;
+    sampleInfo.subsamplesBuffer = subSamplesBuffer;
+    sampleInfo.subsampleCount = subSampleCount;
+    sampleInfo.isEncrypted = true;
+    return true;
+}
+
 static GstFlowReturn transformInPlace(GstBaseTransform* base, GstBuffer* buffer)
 {
     WebKitMediaCommonEncryptionDecrypt* self = WEBKIT_MEDIA_CENC_DECRYPT(base);
@@ -253,7 +336,7 @@ static GstFlowReturn transformInPlace(GstBaseTransform* base, GstBuffer* buffer)
     // The CDM instance needs to be negotiated before we can begin decryption.
     if (!priv->cdmProxy) {
         GST_DEBUG_OBJECT(self, "CDM not available, going to wait for it");
-        priv->condition.waitFor(priv->lock, MaxSecondsToWaitForCDMProxy, [priv] {
+        priv->condition.waitFor(priv->lock, webKitMediaCommonEncryptionMaxSecondsToWaitForCDMProxy, [priv] {
             return priv->isFlushing || priv->cdmProxy || priv->isStopped;
         });
         // Note that waitFor() releases the lock internally while it waits, so isFlushing may have been changed.
@@ -278,80 +361,13 @@ static GstFlowReturn transformInPlace(GstBaseTransform* base, GstBuffer* buffer)
         priv->decryptionState = DecryptionState::Idle;
     });
 
-    bool isCbcs = false;
-    if (auto cipherMode = WebCore::gstStructureGetString(protectionMeta->info, "cipher-mode"_s))
-        isCbcs = WTF::equalIgnoringASCIICase(cipherMode.span(), "cbcs"_s);
-
-    auto ivSizeFromMeta = WebCore::gstStructureGet<unsigned>(protectionMeta->info, "iv_size"_s);
-    if (!ivSizeFromMeta) {
-        GST_ELEMENT_ERROR(self, STREAM, FAILED, ("Failed to get iv_size"), (nullptr));
+    WebKitMediaCommonEncryptionSampleInfo sampleInfo;
+    if (!webKitMediaCommonEncryptionParseProtectionMeta(GST_ELEMENT_CAST(self), protectionMeta, sampleInfo))
         return GST_FLOW_NOT_SUPPORTED;
-    }
 
-    unsigned ivSize;
-    if (*ivSizeFromMeta)
-        ivSize = *ivSizeFromMeta;
-    else {
-        auto constantIvSize = WebCore::gstStructureGet<unsigned>(protectionMeta->info, "constant_iv_size"_s);
-        if (!constantIvSize) {
-            GST_ELEMENT_ERROR(self, STREAM, FAILED, ("No iv_size and failed to get constant_iv_size"), (nullptr));
-            ASSERT(isCbcs);
-            return GST_FLOW_NOT_SUPPORTED;
-        }
-        ivSize = *constantIvSize;
-    }
-
-    auto isEncrypted = WebCore::gstStructureGet<bool>(protectionMeta->info, "encrypted"_s);
-    if (!isEncrypted) {
-        GST_ELEMENT_ERROR(self, STREAM, FAILED, ("Failed to get encrypted flag"), (nullptr));
-        return GST_FLOW_NOT_SUPPORTED;
-    }
-
-    if (!ivSize || !*isEncrypted) {
-        GST_TRACE_OBJECT(self, "iv size %u, encrypted %s, bailing out OK as unencrypted", ivSize, boolForPrinting(*isEncrypted));
+    if (!sampleInfo.isEncrypted)
         return GST_FLOW_OK;
-    }
 
-    GST_DEBUG_OBJECT(base, "protection meta: %" GST_PTR_FORMAT, protectionMeta->info);
-
-    auto subSampleCountFromMeta = WebCore::gstStructureGet<unsigned>(protectionMeta->info, "subsample_count"_s);
-    // cbcs could not include the subsample_count.
-    if (!subSampleCountFromMeta && !isCbcs) {
-        GST_ELEMENT_ERROR(self, STREAM, FAILED, ("Failed to get subsample_count"), (nullptr));
-        return GST_FLOW_NOT_SUPPORTED;
-    }
-
-    const GValue* value;
-    GstBuffer* subSamplesBuffer = nullptr;
-    auto subSampleCount = subSampleCountFromMeta.value_or(0);
-    if (subSampleCount) {
-        value = gst_structure_get_value(protectionMeta->info, "subsamples");
-        if (!value) {
-            GST_ELEMENT_ERROR(self, STREAM, FAILED, ("Failed to get subsamples"), (nullptr));
-            return GST_FLOW_NOT_SUPPORTED;
-        }
-        subSamplesBuffer = gst_value_get_buffer(value);
-        if (!subSamplesBuffer) {
-            GST_ELEMENT_ERROR(self, STREAM, FAILED, ("There is no subsamples buffer, but a positive subsample count"), (nullptr));
-            return GST_FLOW_NOT_SUPPORTED;
-        }
-    }
-
-    value = gst_structure_get_value(protectionMeta->info, "kid");
-
-    if (!value) {
-        GST_ELEMENT_ERROR(self, STREAM, FAILED, ("Failed to get key id for buffer"), (nullptr));
-        return GST_FLOW_NOT_SUPPORTED;
-    }
-    GstBuffer* keyIDBuffer = gst_value_get_buffer(value);
-
-    value = gst_structure_get_value(protectionMeta->info, "iv");
-    if (!value) {
-        GST_ELEMENT_ERROR(self, STREAM, FAILED, ("Failed to get IV for sample"), (nullptr));
-        return GST_FLOW_NOT_SUPPORTED;
-    }
-
-    GstBuffer* ivBuffer = gst_value_get_buffer(value);
     WebKitMediaCommonEncryptionDecryptClass* klass = WEBKIT_MEDIA_CENC_DECRYPT_GET_CLASS(self);
 
     ASSERT(priv->decryptionState == DecryptionState::Idle);
@@ -366,7 +382,7 @@ static GstFlowReturn transformInPlace(GstBaseTransform* base, GstBuffer* buffer)
     // in order to avoid creating several scopes with different Locker instances in each one.
     {
         DropLockForScope noLockScope { locker };
-        result = klass->decrypt(self, ivBuffer, keyIDBuffer, buffer, subSampleCount, subSamplesBuffer);
+        result = klass->decrypt(self, sampleInfo.ivBuffer, sampleInfo.keyIDBuffer, buffer, sampleInfo.subsampleCount, sampleInfo.subsamplesBuffer);
     }
 
     // Accessing priv members again.
@@ -398,9 +414,9 @@ static bool isCDMProxyAvailable(WebKitMediaCommonEncryptionDecrypt* self)
     return priv->cdmProxy;
 }
 
-static CDMProxy* getCDMProxyFromGstContext(WebKitMediaCommonEncryptionDecrypt* self)
+CDMProxy* webKitMediaCommonEncryptionCDMProxyFromContext(GstElement* self)
 {
-    GRefPtr<GstContext> context = adoptGRef(gst_element_get_context(GST_ELEMENT(self), "drm-cdm-proxy"));
+    GRefPtr<GstContext> context = adoptGRef(gst_element_get_context(self, "drm-cdm-proxy"));
     CDMProxy* proxy = nullptr;
 
     // According to the GStreamer documentation, if we can't find the context, we should run a downstream query, then an upstream one and then send a bus
@@ -439,7 +455,7 @@ static gboolean installCDMProxyIfNotAvailable(WebKitMediaCommonEncryptionDecrypt
     if (!isCDMProxyAvailable(self)) {
         gboolean result = FALSE;
 
-        CDMProxy* proxy = getCDMProxyFromGstContext(self);
+        CDMProxy* proxy = webKitMediaCommonEncryptionCDMProxyFromContext(GST_ELEMENT_CAST(self));
         if (proxy) {
             attachCDMProxy(self, proxy);
             result = TRUE;

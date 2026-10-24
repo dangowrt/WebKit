@@ -533,6 +533,7 @@ cdm::Status CdmAdapter::InitializeAudioDecoder(
 cdm::Status CdmAdapter::InitializeVideoDecoder(
   const cdm::VideoDecoderConfig_3& video_decoder_config)
 {
+  std::lock_guard<std::mutex> lock(decrypt_mutex_);
   if (cdm12_)
     return cdm12_->InitializeVideoDecoder(video_decoder_config);
   else if (cdm11_)
@@ -545,6 +546,7 @@ cdm::Status CdmAdapter::InitializeVideoDecoder(
 
 void CdmAdapter::DeinitializeDecoder(cdm::StreamType decoder_type)
 {
+  std::lock_guard<std::mutex> lock(decrypt_mutex_);
   if (cdm12_)
     cdm12_->DeinitializeDecoder(decoder_type);
   else if (cdm11_)
@@ -555,6 +557,7 @@ void CdmAdapter::DeinitializeDecoder(cdm::StreamType decoder_type)
 
 void CdmAdapter::ResetDecoder(cdm::StreamType decoder_type)
 {
+  std::lock_guard<std::mutex> lock(decrypt_mutex_);
   if (cdm12_)
     cdm12_->ResetDecoder(decoder_type);
   else if (cdm11_)
@@ -622,8 +625,9 @@ cdm::Buffer* CdmAdapter::Allocate(uint32_t capacity)
 {
   if (active_buffer_)
   return active_buffer_;
-  else
-  return client_->AllocateBuffer(capacity);
+
+  std::lock_guard<std::mutex> guard(client_mutex_);
+  return client_ ? client_->AllocateBuffer(capacity) : nullptr;
 }
 
 void CdmAdapter::timerfunc(CdmAdapter* adp, int64_t delay, void* context)

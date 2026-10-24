@@ -90,6 +90,7 @@ platform/graphics/gstreamer/eme/CDMThunder.cpp
 platform/graphics/gstreamer/eme/GStreamerEMEUtilities.cpp
 platform/graphics/gstreamer/eme/WebKitCommonEncryptionDecryptorGStreamer.cpp
 platform/graphics/gstreamer/eme/WebKitExternalCDMDecryptorGStreamer.cpp @no-unify
+platform/graphics/gstreamer/eme/WebKitExternalCDMVideoDecoderGStreamer.cpp @no-unify
 platform/graphics/gstreamer/eme/WebKitThunderDecryptorGStreamer.cpp
 platform/graphics/gstreamer/eme/WebKitThunderParser.cpp
 

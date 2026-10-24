@@ -30,6 +30,7 @@
 #include <gst/base/gstbasetransform.h>
 #include <gst/gst.h>
 #include <wtf/RefPtr.h>
+#include <wtf/Seconds.h>
 #include <wtf/WeakPtr.h>
 
 G_BEGIN_DECLS
@@ -69,5 +70,19 @@ G_END_DECLS
 // This function returns a C++ type. It's internal to the decryptors so it is safe to move it here to avoid the C++ return warning because of the C only linkage
 // area.
 WeakPtr<WebCore::CDMProxyDecryptionClient> webKitMediaCommonEncryptionDecryptGetCDMProxyDecryptionClient(WebKitMediaCommonEncryptionDecrypt*);
+
+static constexpr Seconds webKitMediaCommonEncryptionMaxSecondsToWaitForCDMProxy = 5_s;
+
+struct WebKitMediaCommonEncryptionSampleInfo {
+    GstBuffer* ivBuffer { nullptr };
+    GstBuffer* keyIDBuffer { nullptr };
+    GstBuffer* subsamplesBuffer { nullptr };
+    unsigned subsampleCount { 0 };
+    bool isEncrypted { false };
+};
+
+WebCore::CDMProxy* webKitMediaCommonEncryptionCDMProxyFromContext(GstElement*);
+void webKitMediaCommonEncryptionStripProtection(GstStructure*);
+bool webKitMediaCommonEncryptionParseProtectionMeta(GstElement*, GstProtectionMeta*, WebKitMediaCommonEncryptionSampleInfo&);
 
 #endif // ENABLE(ENCRYPTED_MEDIA) && USE(GSTREAMER)

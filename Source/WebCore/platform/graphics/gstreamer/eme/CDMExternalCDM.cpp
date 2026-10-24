@@ -399,6 +399,8 @@ std::shared_ptr<media::CdmAdapter> CDMInstanceExternalCDM::ensureAdapter()
     }
 
     m_adapter = WTF::move(adapter);
+    if (RefPtr cdmProxy = proxy())
+        static_cast<CDMProxyExternalCDM&>(*cdmProxy).setAdapter(m_adapter);
     return m_adapter;
 }
 

@@ -37,6 +37,8 @@
 #include <cstdlib>
 #include <gcrypt.h>
 #include <memory>
+#include <wtf/Condition.h>
+#include <wtf/Lock.h>
 #include <wtf/text/WTFString.h>
 
 namespace WebCore {
@@ -80,6 +82,7 @@ public:
     }
 
     media::CdmAdapter* adapter() const { return m_adapter.get(); }
+    const std::shared_ptr<media::CdmAdapter>& sharedAdapter() const LIFETIME_BOUND { return m_adapter; }
     const String& sessionID() const LIFETIME_BOUND { return m_sessionID; }
 
 private:
@@ -120,12 +123,28 @@ public:
         int64_t timestampUs { 0 };
 
         bool isSubsampled() const { return numSubsamples; }
+        bool isEncrypted() const { return keyID; }
     };
 
     DecryptionResult cencDecrypt(cencDecryptContext&);
     const String& keySystem() const LIFETIME_BOUND { return m_keySystem; }
 
+    void setAdapter(std::shared_ptr<media::CdmAdapter>);
+
+    // The Widevine CDM does not hand decrypted video back to the host.
+    std::shared_ptr<media::CdmAdapter> getOrWaitForVideoAdapter(const cencDecryptContext&, DecryptionResult&);
+    static cdm::Status decryptAndDecodeVideoFrame(media::CdmAdapter&, const cencDecryptContext*, media::CdmVideoFrame&);
+    void abortWaitingForAdapter();
+
 private:
+    struct ExternalCdmInput {
+        Vector<cdm::SubsampleEntry> subsamples;
+        uint8_t iv[16];
+        cdm::InputBuffer_2 buffer { };
+        size_t cipherBytes { 0 };
+    };
+    static bool externalCdmInputFromContext(const cencDecryptContext&, ExternalCdmInput&);
+
     // ClearKey, libgcrypt in process.
     gcry_cipher_hd_t& gCryptHandle();
     bool cencSetCounterVector(const cencDecryptContext&);
@@ -139,6 +158,10 @@ private:
 
     String m_keySystem;
     std::optional<gcry_cipher_hd_t> m_gCryptHandle { std::nullopt };
+
+    Lock m_adapterLock;
+    Condition m_adapterCondition;
+    std::shared_ptr<media::CdmAdapter> m_adapter WTF_GUARDED_BY_LOCK(m_adapterLock);
 };
 
 } // namespace WebCore

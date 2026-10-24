@@ -92,6 +92,7 @@
 #if ENABLE(ENCRYPTED_MEDIA) && ENABLE(EXTERNAL_CDM)
 #include "CDMExternalCDM.h"
 #include "WebKitExternalCDMDecryptorGStreamer.h"
+#include "WebKitExternalCDMVideoDecoderGStreamer.h"
 #endif
 
 #if ENABLE(VIDEO)
@@ -574,6 +575,9 @@ void registerWebKitGStreamerElements()
 #if ENABLE(ENCRYPTED_MEDIA) && ENABLE(EXTERNAL_CDM)
         if (!CDMFactoryExternalCDM::singleton().supportedKeySystems().isEmpty())
             gst_element_register(nullptr, "webkitexternalcdm", GST_RANK_PRIMARY + 100, WEBKIT_TYPE_MEDIA_EXTERNAL_CDM_DECRYPT);
+        // Ranked above the decryptor, parsebin then hands encrypted Widevine video to decodebin3 for this decoder.
+        if (CDMFactoryExternalCDM::singleton().supportsKeySystem(GStreamerEMEUtilities::s_WidevineKeySystem))
+            gst_element_register(nullptr, "webkitexternalcdmvideodec", GST_RANK_PRIMARY + 101, WEBKIT_TYPE_EXTERNAL_CDM_VIDEO_DECODER);
 #endif
 
 #if ENABLE(MEDIA_STREAM)

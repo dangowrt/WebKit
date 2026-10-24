@@ -23,7 +23,23 @@
 
 #if ENABLE(ENCRYPTED_MEDIA) && ENABLE(EXTERNAL_CDM) && USE(GSTREAMER)
 
+#include "CDMProxyExternalCDM.h"
+#include "GStreamerCommon.h"
 #include "WebKitCommonEncryptionDecryptorGStreamer.h"
+#include <optional>
+
+class WebKitExternalCDMDecryptInput {
+public:
+    bool map(GstElement*, GstBuffer* sample, GstMapFlags, const WebKitMediaCommonEncryptionSampleInfo&);
+
+    WebCore::CDMProxyExternalCDM::cencDecryptContext context { };
+
+private:
+    std::optional<WebCore::GstMappedBuffer> m_iv;
+    std::optional<WebCore::GstMappedBuffer> m_keyID;
+    std::optional<WebCore::GstMappedBuffer> m_sample;
+    std::optional<WebCore::GstMappedBuffer> m_subsamples;
+};
 
 G_BEGIN_DECLS
 
