@@ -62,6 +62,7 @@ enum {
     PROP_DATA_DIRECTORY,
     PROP_CACHE_DIRECTORY,
     PROP_IS_EPHEMERAL,
+    PROP_UPLINK,
 
     N_PROPERTIES
 };
@@ -91,6 +92,7 @@ struct _WebKitNetworkSessionPrivate {
 
     CString dataDirectory;
     CString cacheDirectory;
+    String uplink;
 
     HashSet<String> dnsPrefetchedHosts;
     PAL::HysteresisActivity dnsPrefetchHystereris;
@@ -105,6 +107,9 @@ static void webkitNetworkSessionGetProperty(GObject* object, guint propID, GValu
     switch (propID) {
     case PROP_IS_EPHEMERAL:
         g_value_set_boolean(value, webkit_network_session_is_ephemeral(session));
+        break;
+    case PROP_UPLINK:
+        g_value_set_string(value, session->priv->uplink.isNull() ? nullptr : session->priv->uplink.utf8().data());
         break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, propID, paramSpec);
@@ -126,6 +131,9 @@ static void webkitNetworkSessionSetProperty(GObject* object, guint propID, const
         if (g_value_get_boolean(value))
             session->priv->websiteDataManager = adoptGRef(WEBKIT_WEBSITE_DATA_MANAGER(g_object_new(WEBKIT_TYPE_WEBSITE_DATA_MANAGER, "is-ephemeral", TRUE, nullptr)));
         break;
+    case PROP_UPLINK:
+        session->priv->uplink = String::fromUTF8(g_value_get_string(value));
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, propID, paramSpec);
     }
@@ -144,7 +152,13 @@ static void webkitNetworkSessionConstructed(GObject* object)
     }
 
     priv->tlsErrorsPolicy = WEBKIT_TLS_ERRORS_POLICY_FAIL;
-    webkitWebsiteDataManagerGetDataStore(priv->websiteDataManager.get()).setIgnoreTLSErrors(false);
+    Ref websiteDataStore = webkitWebsiteDataManagerGetDataStore(priv->websiteDataManager.get());
+    websiteDataStore->setIgnoreTLSErrors(false);
+
+    // Consume the uplink spec here, after every construct property has been set, so that
+    // the value survives regardless of the order "uplink" and the data directories arrive in.
+    if (!priv->uplink.isNull())
+        websiteDataStore->setUplink(priv->uplink);
 }
 
 static void webkit_network_session_class_init(WebKitNetworkSessionClass* sessionClass)
@@ -196,6 +210,35 @@ static void webkit_network_session_class_init(WebKitNetworkSessionClass* session
             "is-ephemeral",
             nullptr, nullptr,
             FALSE,
+            static_cast<GParamFlags>(WEBKIT_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+
+    /**
+     * WebKitNetworkSession:uplink:
+     *
+     * The uplink that all connections of the session leave through, given as a
+     * source address specification. When %NULL or empty the system routing is
+     * used, which is the default. Otherwise the specification is resolved to a
+     * local IPv4 address that every new connection of the session is bound to,
+     * and the specification may take any of the following forms:
+     *
+     * - An IPv4 literal, used directly as the source address.
+     * - An `address/prefix` range, resolved to the address of the first
+     *   interface that is up and owns an address within the range.
+     * - An interface name, resolved to the first IPv4 address of that interface
+     *   while it is up.
+     *
+     * The specification is resolved anew for every new connection, so a change
+     * of address is followed without recreating the session. When it cannot be
+     * resolved the connection fails rather than falling back to the default
+     * route, which keeps a loss of the uplink visible instead of silent.
+     *
+     * Since: 2.56
+     */
+    sObjProperties[PROP_UPLINK] =
+        g_param_spec_string(
+            "uplink",
+            nullptr, nullptr,
+            nullptr,
             static_cast<GParamFlags>(WEBKIT_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
 
     g_object_class_install_properties(gObjectClass, N_PROPERTIES, sObjProperties.data());

@@ -33,8 +33,15 @@
 #include "GUniquePtrSoup.h"
 #include "Logging.h"
 #include "WebKitAutoconfigProxyResolver.h"
+#include <arpa/inet.h>
+#include <dlfcn.h>
 #include <glib/gstdio.h>
+#include <ifaddrs.h>
 #include <libsoup/soup.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <cerrno>
 #include <pal/crypto/CryptoDigest.h>
 #include <wtf/FileSystem.h>
 #include <wtf/HashSet.h>
@@ -43,6 +50,7 @@
 #include <wtf/glib/GSpanExtras.h>
 #include <wtf/text/Base64.h>
 #include <wtf/text/CString.h>
+#include <wtf/text/StringToIntegerConversion.h>
 
 namespace WebCore {
 
@@ -299,6 +307,168 @@ void SoupNetworkSession::setProxySettings(const SoupNetworkProxySettings& settin
 
     soup_session_set_proxy_resolver(m_soupSession.get(), resolver.get());
     soup_session_abort(m_soupSession.get());
+}
+
+static GRefPtr<GInetAddress> inetAddressForInterface(struct ifaddrs* entry)
+{
+    auto* address = reinterpret_cast<struct sockaddr_in*>(entry->ifa_addr);
+    return adoptGRef(g_inet_address_new_from_bytes(reinterpret_cast<const guint8*>(&address->sin_addr), G_SOCKET_FAMILY_IPV4));
+}
+
+template<typename MatchFunction>
+static GRefPtr<GInetAddress> firstUpIPv4Interface(const MatchFunction& matches)
+{
+    struct ifaddrs* interfaces = nullptr;
+    if (getifaddrs(&interfaces))
+        return nullptr;
+
+    GRefPtr<GInetAddress> result;
+    for (struct ifaddrs* entry = interfaces; entry; entry = entry->ifa_next) {
+        if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET)
+            continue;
+        if (!(entry->ifa_flags & IFF_UP))
+            continue;
+        if (!matches(entry))
+            continue;
+        result = inetAddressForInterface(entry);
+        break;
+    }
+
+    freeifaddrs(interfaces);
+    return result;
+}
+
+static GRefPtr<GInetAddress> resolveUplinkSubnet(const CString& addressText, unsigned prefixLength)
+{
+    struct in_addr subnet;
+    if (inet_pton(AF_INET, addressText.data(), &subnet) != 1)
+        return nullptr;
+
+    uint32_t subnetBits = ntohl(subnet.s_addr);
+    uint32_t mask = prefixLength ? (~uint32_t { 0 } << (32 - prefixLength)) : 0;
+
+    return firstUpIPv4Interface([&](struct ifaddrs* entry) {
+        auto* address = reinterpret_cast<struct sockaddr_in*>(entry->ifa_addr);
+        return (ntohl(address->sin_addr.s_addr) & mask) == (subnetBits & mask);
+    });
+}
+
+struct UplinkTarget {
+    GRefPtr<GInetAddress> address;
+    CString device;
+};
+
+// Resolve an uplink specification: an address or subnet to the local address a
+// connection binds to, or an interface name to the device to bind it to with no
+// address, so either family follows the device's current address. The resolution
+// runs for every connection so an address change is followed.
+static UplinkTarget resolveUplink(const String& uplink)
+{
+    if (uplink.isEmpty())
+        return { };
+
+    size_t slashPosition = uplink.find('/');
+    if (slashPosition != notFound) {
+        auto prefixLength = parseInteger<unsigned>(StringView(uplink).substring(slashPosition + 1), 10, WTF::ParseIntegerWhitespacePolicy::Disallow);
+        if (!prefixLength || *prefixLength > 32)
+            return { };
+        return { resolveUplinkSubnet(uplink.left(slashPosition).utf8(), *prefixLength), { } };
+    }
+
+    CString uplinkText = uplink.utf8();
+    GRefPtr<GInetAddress> literal = adoptGRef(g_inet_address_new_from_string(uplinkText.data()));
+    if (literal)
+        return { WTF::move(literal), { } };
+
+    return { nullptr, uplinkText };
+}
+
+void SoupNetworkSession::bindConnectionToUplink(GIOStream* connection)
+{
+    if (m_uplink.isEmpty())
+        return;
+
+    if (!G_IS_SOCKET_CONNECTION(connection))
+        return;
+
+    GSocket* socket = g_socket_connection_get_socket(G_SOCKET_CONNECTION(connection));
+    if (!socket)
+        return;
+
+    int fd = g_socket_get_fd(socket);
+
+    // A reused SoupMessage can carry the network-event handler more than once. A
+    // second SO_BINDTODEVICE on the same socket fails with EPERM for an
+    // unprivileged process, so skip a socket this session has already pinned,
+    // whether by device or by a non-wildcard address.
+    char boundDevice[IFNAMSIZ] = { };
+    socklen_t boundDeviceLength = sizeof(boundDevice);
+    if (!getsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, boundDevice, &boundDeviceLength) && boundDevice[0])
+        return;
+    GRefPtr<GSocketAddress> boundAddress = adoptGRef(g_socket_get_local_address(socket, nullptr));
+    if (boundAddress && G_IS_INET_SOCKET_ADDRESS(boundAddress.get())
+        && !g_inet_address_get_is_any(g_inet_socket_address_get_address(G_INET_SOCKET_ADDRESS(boundAddress.get()))))
+        return;
+
+    size_t separator = m_uplink.find(';');
+    UplinkTarget target = resolveUplink(separator == notFound ? m_uplink : m_uplink.left(separator));
+
+    // An interface pin binds the device only, for either family. The kernel picks
+    // the device's current source address at connect, so a v4 or v6 address change
+    // during the session is followed, and a family the device cannot route fails
+    // the connection locally.
+    if (!target.device.isNull()) {
+        if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, target.device.data(), target.device.length())) {
+            WTFLogAlways("uplink: SO_BINDTODEVICE '%s' failed on fd %d: %s", target.device.data(), fd, g_strerror(errno));
+            g_socket_close(socket, nullptr);
+            return;
+        }
+        RELEASE_LOG(Network, "uplink: bound fd %d to dev %s (spec '%s')", fd, target.device.data(), m_uplink.utf8().data());
+        return;
+    }
+
+    // An address or subnet pin binds that address; a socket of the other family
+    // cannot leave through it and is failed closed.
+    if (target.address && g_socket_get_family(socket) == g_inet_address_get_family(target.address.get())) {
+        GRefPtr<GSocketAddress> bindAddress = adoptGRef(g_inet_socket_address_new(target.address.get(), 0));
+        GUniqueOutPtr<GError> error;
+        GUniquePtr<char> addrText(g_inet_address_to_string(target.address.get()));
+        if (!g_socket_bind(socket, bindAddress.get(), FALSE, &error.outPtr())) {
+            WTFLogAlways("uplink: bind to %s failed on fd %d: %s", addrText.get(), fd, error->message);
+            g_socket_close(socket, nullptr);
+            return;
+        }
+        RELEASE_LOG(Network, "uplink: bound fd %d to %s (spec '%s')", fd, addrText.get(), m_uplink.utf8().data());
+        return;
+    }
+
+    // Unresolved, device down, or a family this pin cannot satisfy: fail closed
+    // instead of leaving through the default route, so the loss stays visible.
+    WTFLogAlways("uplink: '%s' not satisfiable for fd %d, failing", m_uplink.utf8().data(), fd);
+    g_socket_close(socket, nullptr);
+}
+
+void SoupNetworkSession::setUplink(const String& uplink)
+{
+    m_uplink = uplink;
+    if (m_uplink.isEmpty())
+        return;
+
+    // Register the full spec, including any ';dns=' resolver list, with the uplink
+    // DNS interposition library when it is preloaded, so each connection's names
+    // resolve through the uplink the socket is bound to below. There is no link
+    // dependency: without the library the lookups use the system resolver.
+    using UplinkAddFunction = int (*)(const char*);
+    if (auto uplinkAdd = reinterpret_cast<UplinkAddFunction>(dlsym(RTLD_DEFAULT, "uplinkdns_uplink_add")))
+        uplinkAdd(m_uplink.utf8().data());
+
+    g_signal_connect(m_soupSession.get(), "request-queued", G_CALLBACK(+[](SoupSession*, SoupMessage* message, gpointer userData) {
+        g_signal_connect(message, "network-event", G_CALLBACK(+[](SoupMessage*, GSocketClientEvent event, GIOStream* connection, gpointer userData) {
+            if (event != G_SOCKET_CLIENT_CONNECTING)
+                return;
+            static_cast<SoupNetworkSession*>(userData)->bindConnectionToUplink(connection);
+        }), userData);
+    }), this);
 }
 
 void SoupNetworkSession::setInitialAcceptLanguages(const CString& languages)

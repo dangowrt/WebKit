@@ -66,6 +66,8 @@ public:
 
     void setProxySettings(const SoupNetworkProxySettings&);
 
+    void setUplink(const String&);
+
     static void setInitialAcceptLanguages(const CString&);
     void setAcceptLanguages(const CString&);
 
@@ -79,11 +81,13 @@ public:
 
 private:
     void setupLogger();
+    void bindConnectionToUplink(GIOStream*);
 
     GRefPtr<SoupSession> m_soupSession;
     PAL::SessionID m_sessionID;
     bool m_ignoreTLSErrors { false };
     SoupNetworkProxySettings m_proxySettings;
+    String m_uplink;
     HashMap<String, HostTLSCertificateSet, ASCIICaseInsensitiveHash> m_allowedCertificates;
 };
 

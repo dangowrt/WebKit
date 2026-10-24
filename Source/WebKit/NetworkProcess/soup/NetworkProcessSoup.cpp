@@ -163,6 +163,12 @@ void NetworkProcess::setIgnoreTLSErrors(PAL::SessionID sessionID, bool ignoreTLS
         static_cast<NetworkSessionSoup&>(*session).setIgnoreTLSErrors(ignoreTLSErrors);
 }
 
+void NetworkProcess::setUplink(PAL::SessionID sessionID, const String& uplink)
+{
+    if (auto* session = networkSession(sessionID))
+        static_cast<NetworkSessionSoup&>(*session).setUplink(uplink);
+}
+
 void NetworkProcess::allowSpecificHTTPSCertificateForHost(PAL::SessionID sessionID, const CertificateInfo& certificateInfo, const String& host)
 {
     if (auto* session = networkSession(sessionID))

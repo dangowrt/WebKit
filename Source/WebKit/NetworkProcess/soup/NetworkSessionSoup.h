@@ -64,6 +64,7 @@ public:
     bool persistentCredentialStorageEnabled() const { return m_persistentCredentialStorageEnabled; }
 
     void setIgnoreTLSErrors(bool);
+    void setUplink(const String&);
     void allowSpecificHTTPSCertificateForHost(const WebCore::CertificateInfo&, const String&);
     void setProxySettings(const WebCore::SoupNetworkProxySettings&);
 

@@ -40,6 +40,7 @@ void WebsiteDataStore::platformSetNetworkParameters(WebsiteDataStoreParameters& 
     networkSessionParameters.persistentCredentialStorageEnabled = m_persistentCredentialStorageEnabled;
     networkSessionParameters.ignoreTLSErrors = m_ignoreTLSErrors;
     networkSessionParameters.proxySettings = m_networkProxySettings;
+    networkSessionParameters.uplink = m_uplink;
     networkSessionParameters.cookiePersistentStoragePath = m_cookiePersistentStoragePath;
     networkSessionParameters.cookiePersistentStorageType = m_cookiePersistentStorageType;
     networkSessionParameters.cookieAcceptPolicy = m_cookieAcceptPolicy;
@@ -70,6 +71,15 @@ void WebsiteDataStore::setNetworkProxySettings(WebCore::SoupNetworkProxySettings
 {
     m_networkProxySettings = WTF::move(settings);
     networkProcess().send(Messages::NetworkProcess::SetNetworkProxySettings(m_sessionID, m_networkProxySettings), 0);
+}
+
+void WebsiteDataStore::setUplink(const String& uplink)
+{
+    // The creation parameters carry the uplink for a session not yet created,
+    // and this message carries it to one already created, so it applies
+    // whichever order the uplink and the data directories arrive in.
+    m_uplink = uplink;
+    networkProcess().send(Messages::NetworkProcess::SetUplink(m_sessionID, m_uplink), 0);
 }
 
 void WebsiteDataStore::setCookiePersistentStorage(const String& storagePath, SoupCookiePersistentStorageType storageType)

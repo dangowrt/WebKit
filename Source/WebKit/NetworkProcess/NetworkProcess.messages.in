@@ -38,6 +38,7 @@ messages -> NetworkProcess : AuxiliaryProcess WantsAsyncDispatchMessage {
     SetIgnoreTLSErrors(PAL::SessionID sessionID, bool ignoreTLSErrors)
     UserPreferredLanguagesChanged(Vector<String> languages)
     SetNetworkProxySettings(PAL::SessionID sessionID, struct WebCore::SoupNetworkProxySettings settings)
+    SetUplink(PAL::SessionID sessionID, String uplink)
     PrefetchDNS(String hostname)
     SetPersistentCredentialStorageEnabled(PAL::SessionID sessionID, bool enabled)
 #endif

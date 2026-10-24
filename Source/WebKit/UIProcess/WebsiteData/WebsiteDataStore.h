@@ -338,6 +338,8 @@ public:
     bool ignoreTLSErrors() const { return m_ignoreTLSErrors; }
     void setNetworkProxySettings(WebCore::SoupNetworkProxySettings&&);
     const WebCore::SoupNetworkProxySettings& networkProxySettings() const LIFETIME_BOUND { return m_networkProxySettings; }
+    void setUplink(const String&);
+    const String& uplink() const LIFETIME_BOUND { return m_uplink; }
     void setCookiePersistentStorage(const String&, SoupCookiePersistentStorageType);
     void setHTTPCookieAcceptPolicy(WebCore::HTTPCookieAcceptPolicy);
 #endif
@@ -646,6 +648,7 @@ private:
     bool m_persistentCredentialStorageEnabled { true };
     bool m_ignoreTLSErrors { true };
     WebCore::SoupNetworkProxySettings m_networkProxySettings;
+    String m_uplink;
     String m_cookiePersistentStoragePath;
     SoupCookiePersistentStorageType m_cookiePersistentStorageType { SoupCookiePersistentStorageType::SQLite };
     WebCore::HTTPCookieAcceptPolicy m_cookieAcceptPolicy { WebCore::HTTPCookieAcceptPolicy::ExclusivelyFromMainDocumentDomain };

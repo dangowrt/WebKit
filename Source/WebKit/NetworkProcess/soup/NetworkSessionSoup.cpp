@@ -57,6 +57,9 @@ NetworkSessionSoup::NetworkSessionSoup(NetworkProcess& networkProcess, const Net
     if (parameters.proxySettings.mode != SoupNetworkProxySettings::Mode::Default)
         setProxySettings(parameters.proxySettings);
 
+    if (!parameters.uplink.isEmpty())
+        m_networkSession->setUplink(parameters.uplink);
+
     if (!parameters.cookiePersistentStoragePath.isEmpty())
         setCookiePersistentStorage(parameters.cookiePersistentStoragePath, parameters.cookiePersistentStorageType);
     else
@@ -123,6 +126,11 @@ RefPtr<WebSocketTask> NetworkSessionSoup::createWebSocketTask(WebPageProxyIdenti
 void NetworkSessionSoup::setIgnoreTLSErrors(bool ignoreTLSErrors)
 {
     m_networkSession->setIgnoreTLSErrors(ignoreTLSErrors);
+}
+
+void NetworkSessionSoup::setUplink(const String& uplink)
+{
+    m_networkSession->setUplink(uplink);
 }
 
 void NetworkSessionSoup::allowSpecificHTTPSCertificateForHost(const CertificateInfo& certificateInfo, const String& host)

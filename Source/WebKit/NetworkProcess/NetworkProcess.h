@@ -594,6 +594,7 @@ private:
     void setIgnoreTLSErrors(PAL::SessionID, bool);
     void userPreferredLanguagesChanged(const Vector<String>&);
     void setNetworkProxySettings(PAL::SessionID, WebCore::SoupNetworkProxySettings&&);
+    void setUplink(PAL::SessionID, const String&);
     void setPersistentCredentialStorageEnabled(PAL::SessionID, bool);
 #endif
 
