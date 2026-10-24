@@ -477,6 +477,17 @@ static void bindExternalCDM(Vector<CString>& args)
     if (!cdmPath || !*cdmPath)
         return;
     bindIfExists(args, cdmPath);
+
+    // An optional preload (e.g. an ifunc resolver) is injected into the web
+    // process only, so a glibc CDM blob loads under a libc without ifunc.
+    const char* cdmPreload = g_getenv("WPE_WIDEVINE_CDM_PRELOAD");
+    if (!cdmPreload || !*cdmPreload)
+        return;
+    const char* existingPreload = g_getenv("LD_PRELOAD");
+    GUniquePtr<char> preloadValue(existingPreload && *existingPreload
+        ? g_strdup_printf("%s:%s", cdmPreload, existingPreload)
+        : g_strdup(cdmPreload));
+    args.appendList<CString>({ "--setenv", "LD_PRELOAD", preloadValue.get() });
 }
 #endif
 
