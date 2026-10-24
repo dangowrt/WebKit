@@ -39,8 +39,8 @@ class BitmapTexture;
 
 class CoordinatedPlatformLayerBufferExternalOES final : public CoordinatedPlatformLayerBuffer {
 public:
-    static std::unique_ptr<CoordinatedPlatformLayerBufferExternalOES> create(unsigned textureID, const IntSize&, OptionSet<TextureMapperFlags>, std::unique_ptr<GLFence>&&);
-    CoordinatedPlatformLayerBufferExternalOES(unsigned textureID, const IntSize&, OptionSet<TextureMapperFlags>, std::unique_ptr<GLFence>&&);
+    static std::unique_ptr<CoordinatedPlatformLayerBufferExternalOES> create(unsigned textureID, const IntSize&, const IntSize& textureSize, OptionSet<TextureMapperFlags>, std::unique_ptr<GLFence>&&);
+    CoordinatedPlatformLayerBufferExternalOES(unsigned textureID, const IntSize&, const IntSize& textureSize, OptionSet<TextureMapperFlags>, std::unique_ptr<GLFence>&&);
 #if USE(GSTREAMER) && USE(GBM)
     enum class SampleRange : bool { Narrow, Full };
     static std::unique_ptr<CoordinatedPlatformLayerBufferExternalOES> create(GRefPtr<GstBuffer>&&, uint32_t fourcc, CoordinatedPlatformLayerBufferYUV::YuvToRgbColorSpace, SampleRange, const IntSize&, OptionSet<TextureMapperFlags>);
@@ -61,6 +61,7 @@ private:
 #endif
 
     unsigned m_textureID { 0 };
+    IntSize m_textureSize;
 #if USE(GSTREAMER) && USE(GBM)
     uint32_t m_fourcc { 0 };
     CoordinatedPlatformLayerBufferYUV::YuvToRgbColorSpace m_yuvColorSpace { CoordinatedPlatformLayerBufferYUV::YuvToRgbColorSpace::Bt601 };

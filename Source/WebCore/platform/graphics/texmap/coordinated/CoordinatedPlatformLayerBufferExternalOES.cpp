@@ -53,9 +53,9 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
 
 namespace WebCore {
 
-std::unique_ptr<CoordinatedPlatformLayerBufferExternalOES> CoordinatedPlatformLayerBufferExternalOES::create(unsigned textureID, const IntSize& size, OptionSet<TextureMapperFlags> flags, std::unique_ptr<GLFence>&& fence)
+std::unique_ptr<CoordinatedPlatformLayerBufferExternalOES> CoordinatedPlatformLayerBufferExternalOES::create(unsigned textureID, const IntSize& size, const IntSize& textureSize, OptionSet<TextureMapperFlags> flags, std::unique_ptr<GLFence>&& fence)
 {
-    return makeUnique<CoordinatedPlatformLayerBufferExternalOES>(textureID, size, flags, WTF::move(fence));
+    return makeUnique<CoordinatedPlatformLayerBufferExternalOES>(textureID, size, textureSize, flags, WTF::move(fence));
 }
 
 #if USE(GSTREAMER) && USE(GBM)
@@ -65,9 +65,10 @@ std::unique_ptr<CoordinatedPlatformLayerBufferExternalOES> CoordinatedPlatformLa
 }
 #endif
 
-CoordinatedPlatformLayerBufferExternalOES::CoordinatedPlatformLayerBufferExternalOES(unsigned textureID, const IntSize& size, OptionSet<TextureMapperFlags> flags, std::unique_ptr<GLFence>&& fence)
+CoordinatedPlatformLayerBufferExternalOES::CoordinatedPlatformLayerBufferExternalOES(unsigned textureID, const IntSize& size, const IntSize& textureSize, OptionSet<TextureMapperFlags> flags, std::unique_ptr<GLFence>&& fence)
     : CoordinatedPlatformLayerBuffer(Type::ExternalOES, size, flags, WTF::move(fence))
     , m_textureID(textureID)
+    , m_textureSize(textureSize.isEmpty() ? size : textureSize)
 {
 }
 
@@ -196,7 +197,12 @@ void CoordinatedPlatformLayerBufferExternalOES::paintToTextureMapper(TextureMapp
 {
     waitForContentsIfNeeded();
     if (m_textureID) {
-        textureMapper.drawTextureExternalOES(m_textureID, m_flags, targetRect, modelViewMatrix, opacity);
+        // The decoder's texture is padded up to a coded size; sample only the
+        // display-sized region so the uninitialised pad rows do not show.
+        FloatSize visibleScale(1, 1);
+        if (m_textureSize.width() > 0 && m_textureSize.height() > 0)
+            visibleScale = FloatSize(static_cast<float>(size().width()) / m_textureSize.width(), static_cast<float>(size().height()) / m_textureSize.height());
+        textureMapper.drawTextureExternalOES(m_textureID, m_flags, targetRect, modelViewMatrix, opacity, visibleScale);
         return;
     }
 

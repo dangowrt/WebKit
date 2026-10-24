@@ -1566,10 +1566,24 @@ void TextureMapper::updateProjectionMatrix()
     data().projectionMatrix = createProjectionMatrix(size, flipY, data().zNear, data().zFar);
 }
 
-void TextureMapper::drawTextureExternalOES(GLuint texture, OptionSet<TextureMapperFlags> flags, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity)
+void TextureMapper::drawTextureExternalOES(GLuint texture, OptionSet<TextureMapperFlags> flags, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity, const FloatSize& visibleScale)
 {
     flags.add(TextureMapperFlags::ShouldUseExternalOESTextureRect);
     Ref<TextureMapperShaderProgram> program = data().getShaderProgram(TextureMapperShaderProgram::Option::TextureExternalOES);
+
+    // The decoder pads its texture up to a coded size; scale the texture
+    // coordinates so only the display-sized region is sampled, dropping the
+    // uninitialised pad rows that otherwise show as a bar at the edge.
+    if (visibleScale != FloatSize(1, 1)) {
+        TransformationMatrix savedPatternTransform = patternTransform();
+        TransformationMatrix croppedPatternTransform = savedPatternTransform;
+        croppedPatternTransform.scaleNonUniform(visibleScale.width(), visibleScale.height());
+        setPatternTransform(croppedPatternTransform);
+        drawTexturedQuadWithProgram(program.get(), { { texture, program->externalOESTextureLocation() } }, flags, targetRect, modelViewMatrix, opacity);
+        setPatternTransform(savedPatternTransform);
+        return;
+    }
+
     drawTexturedQuadWithProgram(program.get(), { { texture, program->externalOESTextureLocation() } }, flags, targetRect, modelViewMatrix, opacity);
 }
 

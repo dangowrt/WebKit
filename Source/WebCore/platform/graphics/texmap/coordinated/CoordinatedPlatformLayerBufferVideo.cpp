@@ -229,7 +229,7 @@ std::unique_ptr<CoordinatedPlatformLayerBuffer> CoordinatedPlatformLayerBufferVi
     auto buffer = gst_sample_get_buffer(sample.get());
     auto textureTarget = gst_gl_memory_get_texture_target(GST_GL_MEMORY_CAST(gst_buffer_peek_memory(buffer, 0)));
     if (textureTarget == GST_GL_TEXTURE_TARGET_EXTERNAL_OES)
-        return CoordinatedPlatformLayerBufferExternalOES::create(m_mappedVideoFrame->textureID(0), m_size, m_flags, nullptr);
+        return CoordinatedPlatformLayerBufferExternalOES::create(m_mappedVideoFrame->textureID(0), m_size, IntSize(GST_VIDEO_INFO_WIDTH(m_mappedVideoFrame->info()), GST_VIDEO_INFO_HEIGHT(m_mappedVideoFrame->info())), m_flags, nullptr);
 
     if ((GST_VIDEO_INFO_IS_RGB(m_mappedVideoFrame->info()) && GST_VIDEO_INFO_N_PLANES(m_mappedVideoFrame->info()) == 1))
         return CoordinatedPlatformLayerBufferRGB::create(m_mappedVideoFrame->textureID(0), m_size, m_flags, nullptr);
