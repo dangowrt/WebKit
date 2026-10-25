@@ -229,6 +229,7 @@ HashSet<String, ASCIICaseInsensitiveHash>& MIMETypeRegistry::supportedNonImageMI
             "application/xhtml+xml"_s,
 #if !PLATFORM(IOS_FAMILY)
             "application/vnd.wap.xhtml+xml"_s,
+            "application/vnd.hbbtv.xhtml+xml"_s,
             "application/rss+xml"_s,
             "application/atom+xml"_s,
 #endif
